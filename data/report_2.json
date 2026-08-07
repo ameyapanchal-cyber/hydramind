@@ -1,0 +1,62 @@
+{
+  "target": "scanme.nmap.org",
+  "raw": {
+    "nmap": [
+      {
+        "host": "45.33.32.156",
+        "port": 22,
+        "protocol": "tcp",
+        "service": "ssh",
+        "product": "OpenSSH",
+        "version": "6.6.1p1 Ubuntu 2ubuntu2.13"
+      },
+      {
+        "host": "45.33.32.156",
+        "port": 80,
+        "protocol": "tcp",
+        "service": "http",
+        "product": "Apache httpd",
+        "version": "2.4.7"
+      },
+      {
+        "host": "45.33.32.156",
+        "port": 9929,
+        "protocol": "tcp",
+        "service": "nping-echo",
+        "product": "Nping echo",
+        "version": null
+      },
+      {
+        "host": "45.33.32.156",
+        "port": 31337,
+        "protocol": "tcp",
+        "service": "tcpwrapped",
+        "product": null,
+        "version": null
+      }
+    ],
+    "gobuster": [],
+    "nikto": []
+  },
+  "triage": {
+    "ranked_findings": [
+      {
+        "rank": 1,
+        "severity": "HIGH",
+        "source": "nmap",
+        "finding": "OpenSSH 6.6.1p1 on port 22",
+        "why": "This version of OpenSSH is outdated and may contain known vulnerabilities that could be exploited for unauthorized access or privilege escalation.",
+        "next_step": "Attempt to exploit known vulnerabilities or perform a brute-force attack on SSH."
+      },
+      {
+        "rank": 2,
+        "severity": "MEDIUM",
+        "source": "nmap",
+        "finding": "Apache httpd 2.4.7 on port 80",
+        "why": "Apache 2.4.7 is also an outdated version that may have vulnerabilities, including potential remote code execution or denial of service attacks.",
+        "next_step": "Run a vulnerability scan against the Apache server to identify specific weaknesses."
+      }
+    ],
+    "summary": "The findings indicate the presence of outdated services that could be exploited. The SSH service is particularly concerning due to its critical nature and known vulnerabilities. Immediate action should be taken to assess and exploit these weaknesses."
+  }
+}
