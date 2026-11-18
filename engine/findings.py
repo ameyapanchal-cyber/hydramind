@@ -41,6 +41,9 @@ def finding_from_tool(tool: str, target: str, d: dict) -> Finding:
     elif tool == "nikto":
         title = (d.get("finding") or "nikto finding")[:120]
         desc = d.get("finding") or ""
+    elif tool in ("curl", "sqlmap", "redis-cli"):
+        title = (d.get("title") or f"{tool} finding")[:120]
+        desc = d.get("detail") or d.get("evidence") or json.dumps(d)
     else:
         title, desc = json.dumps(d)[:120], json.dumps(d)
     return Finding(tool=tool, target=target, title=title, description=desc,

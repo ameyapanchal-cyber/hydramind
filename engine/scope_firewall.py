@@ -15,7 +15,8 @@ from pathlib import Path
 import yaml
 
 # Tools that must never run outside an environment: lab target
-EXPLOIT_CLASS_TOOLS = {"sqlmap", "hydra", "wpscan", "commix", "metasploit"}
+EXPLOIT_CLASS_TOOLS = {"sqlmap", "hydra", "wpscan", "commix", "metasploit",
+                       "redis-cli"}
 
 VALID_ENVIRONMENTS = {"lab", "live_authorized"}
 

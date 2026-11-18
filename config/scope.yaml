@@ -35,7 +35,7 @@ targets:
   - host: 127.0.0.1
     authorized: true
     environment: lab
-    allowed_tools: [nmap, gobuster, nikto, sqlmap, hydra, wpscan, commix]
+    allowed_tools: [nmap, gobuster, nikto, sqlmap, hydra, wpscan, commix, curl, redis-cli]
 
 denied_hosts:
   - localhost

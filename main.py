@@ -12,9 +12,11 @@ from engine.scope_firewall import ScopeFirewall, ScopeError
 from engine.tools.nmap_tool import run_nmap, parse_nmap
 from engine.tools.gobuster_tool import run_gobuster, parse_gobuster, DEFAULT_WORDLIST
 from engine.tools.nikto_tool import run_nikto, parse_nikto
+from engine.tools.curl_tool import run_curl, parse_curl
+from engine.tools.sqlmap_tool import run_sqlmap, parse_sqlmap
+from engine.tools.redis_tool import run_redis, parse_redis
 from engine.triager import triage
-from engine.reasoner import (reason_about_finding, validate_action,
-                             KNOWN_TOOLS)
+from engine.reasoner import reason_about_finding, validate_action
 from engine.findings import finding_from_tool, finding_from_triage
 from engine import db
 
@@ -98,6 +100,38 @@ def _execute_action(tool: str, args: list[str], target: str,
         status = "timed out" if result.timed_out else f"rc={result.returncode}"
         return findings, f"{status}, {len(findings)} finding(s) @ {url}"
 
+    if tool == "curl":
+        result = run_curl(args)
+        findings = [] if result.timed_out else parse_curl(result)
+        status = "timed out" if result.timed_out else f"rc={result.returncode}"
+        body = (result.stdout or result.stderr or "").strip().replace("\n", " ")[:220]
+        return findings, f"{status}, {len(findings)} finding(s) — {body}"
+
+    if tool == "sqlmap":
+        url = _url_from_args(args, target)
+        if not url:
+            return [], "no -u/--url referencing the target — not executed"
+        extra, skip = [], False
+        for a in args:
+            if skip:
+                skip = False
+                continue
+            if a in ("-u", "--url"):
+                skip = True
+                continue
+            extra.append(a)
+        result = run_sqlmap(url, extra=extra)
+        findings = [] if result.timed_out else parse_sqlmap(result)
+        status = "timed out" if result.timed_out else f"rc={result.returncode}"
+        return findings, f"{status}, {len(findings)} finding(s)"
+
+    if tool == "redis-cli":
+        result = run_redis(args)
+        findings = [] if result.timed_out else parse_redis(result)
+        status = "timed out" if result.timed_out else f"rc={result.returncode}"
+        out = (result.stdout or result.stderr or "").strip().replace("\n", " ")[:220]
+        return findings, f"{status}, {len(findings)} finding(s) — {out}"
+
     return [], "not executed"
 
 
@@ -112,6 +146,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="HydraMind (Phase 2)")
     ap.add_argument("--target", required=True)
     ap.add_argument("--skip-nikto", action="store_true", help="skip nikto (slow)")
+    ap.add_argument("--ports", help="nmap port spec (e.g. 1-10000, 6379,8080)")
     args = ap.parse_args()
 
     # 1. Scope gate (stage 1: host authorization)
@@ -131,7 +166,7 @@ def main() -> int:
 
     # 2. nmap
     print("[nmap] scanning ports + services...")
-    result, xml_path = run_nmap(target)
+    result, xml_path = run_nmap(target, extra_args=["-p", args.ports] if args.ports else None)
     nmap_findings = parse_nmap(xml_path)
     all_findings["nmap"] = nmap_findings
     db.save_findings(scan_id, "nmap", nmap_findings)
@@ -254,29 +289,6 @@ def main() -> int:
         if action is None:
             result_text = "not executed: proposed command failed safety validation"
             status = "guard-rejected"
-        elif action["tool"] not in KNOWN_TOOLS:
-            # exploitation-class / phase-3 tool: approve + log + queue, NEVER run here
-            try:
-                fw.check_tool(target, action["tool"])
-                print(f"  → [phase3] {action['tool']} approved + queued "
-                      f"(not implemented yet) — stopping pipeline.")
-                db.log_action(scan_id, item["rank"], action["tool"],
-                              out.risk_level, out.attack_hypothesis,
-                              approved=True, executed=False)
-                status = "queued-phase3"
-            except ScopeError as e:
-                result_text = str(e)
-                status = "scope-blocked"
-                print(f"  → BLOCKED: {e}")
-            if status == "queued-phase3":
-                db.log_reasoner_decision(finding_id, out.attack_hypothesis,
-                                         out.exact_tool_and_command, out.confidence,
-                                         out.risk_level, "approved",
-                                         result="queued for Phase 3")
-                decisions.append({**out.to_dict(), "rank": item["rank"],
-                                  "human_decision": "approved",
-                                  "status": status})
-                break  # nothing executes past this point until Phase 3
         else:
             # stage 2: per-tool authorization + stage-1 re-check
             try:
