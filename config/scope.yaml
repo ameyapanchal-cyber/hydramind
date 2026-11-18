@@ -1,8 +1,36 @@
 # SCOPE FIREWALL — only targets listed here can be scanned.
-# Add ONLY systems you are authorized to test (lab VMs, HTB/PortSwigger, in-scope bounty).
+#
+# Two ways to authorize targets:
+#
+# 1. LEGACY simple list (recon only — exploitation-class tools always refused):
+# allowed_hosts:
+#   - scanme.nmap.org
+#
+# 2. RICH POLICY LIST — full per-target control (lab AND live-authorized):
+#
+# targets:
+#   - host: <ip_or_domain_or_cidr>
+#     authorized: true
+#     environment: lab | live_authorized
+#     allowed_tools: [nmap, gobuster, nikto, sqlmap, hydra, wpscan, commix]
+#     forbidden_tools: []                      # hard-blocked for this target
+#     program_rules_url: https://...           # optional, live_authorized bug bounty
+#     rate_limit: low | medium                 # optional
+#
+# Notes:
+# - exploitation-class tools (sqlmap/hydra/wpscan/commix/metasploit) are refused
+#   UNLESS environment: lab — no exceptions, even if allowed_tools lists them.
+# - if allowed_tools is empty/omitted for a rich entry, recon tools are allowed
+#   and exploitation-class tools follow the environment rule.
+# - DO NOT add entries here unless you are authorized to test the target.
+# - Add your lab VM / bug-bounty entries yourself once confirmed reachable.
+
 allowed_hosts:
   - scanme.nmap.org        # Nmap's official authorized practice host
   # - 192.168.56.101       # your Metasploitable VM (uncomment + edit)
+
+targets: []                # rich policy entries go here (see schema above)
+
 denied_hosts:
   - localhost
   - 127.0.0.1
