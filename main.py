@@ -56,7 +56,24 @@ def _wordlist_from_args(args: list[str]) -> str:
     return DEFAULT_WORDLIST
 
 
-def _execute_action(tool: str, args: list[str], target: str) -> tuple[list[dict], str]:
+def _web_url(target: str, port: int) -> str:
+    scheme = "https" if port in (443, 8443) else "http"
+    return f"{scheme}://{target}:{port}"
+
+
+def _url_from_args(args: list[str], target: str) -> str | None:
+    """Extract a validated -u/-h URL from a proposed command; must reference
+    the scoped target (a non-standard web port then survives into execution)."""
+    for flag in ("-u", "-h"):
+        if flag in args:
+            i = args.index(flag)
+            if i + 1 < len(args) and target.lower() in args[i + 1].lower():
+                return args[i + 1]
+    return None
+
+
+def _execute_action(tool: str, args: list[str], target: str,
+                    default_url: str | None = None) -> tuple[list[dict], str]:
     """Run an approved, validated action through runner.py.
     Returns (findings, summary)."""
     if tool == "nmap":
@@ -66,17 +83,19 @@ def _execute_action(tool: str, args: list[str], target: str) -> tuple[list[dict]
         status = "timed out" if result.timed_out else f"rc={result.returncode}"
         return findings, f"{status}, {len(findings)} finding(s)"
 
+    url = _url_from_args(args, target) or default_url or target
+
     if tool == "gobuster":
-        result = run_gobuster(target, wordlist=_wordlist_from_args(args))
+        result = run_gobuster(url, wordlist=_wordlist_from_args(args))
         findings = [] if result.timed_out else parse_gobuster(result)
         status = "timed out" if result.timed_out else f"rc={result.returncode}"
-        return findings, f"{status}, {len(findings)} path(s)"
+        return findings, f"{status}, {len(findings)} path(s) @ {url}"
 
     if tool == "nikto":
-        result = run_nikto(target)
+        result = run_nikto(url)
         findings = [] if result.timed_out else parse_nikto(result)
         status = "timed out" if result.timed_out else f"rc={result.returncode}"
-        return findings, f"{status}, {len(findings)} finding(s)"
+        return findings, f"{status}, {len(findings)} finding(s) @ {url}"
 
     return [], "not executed"
 
@@ -117,29 +136,44 @@ def main() -> int:
     db.save_findings(scan_id, "nmap", nmap_findings)
     print(f"       {len(nmap_findings)} open port(s) found.")
 
-    # 3. gobuster (only if a web port is open)
-    web_ports = [f["port"] for f in nmap_findings if f["port"] in (80, 443, 8080, 8443)]
-    if web_ports:
-        print(f"[gobuster] web port(s) found — brute-forcing directories...")
-        gb_result = run_gobuster(target)
-        gb_findings = [] if gb_result.timed_out else parse_gobuster(gb_result)
+    # 3. gobuster (one pass per discovered web port)
+    web_ports = [f["port"] for f in nmap_findings if f["port"] in (80, 443, 8080, 8443, 8081)]
+    web_urls = [_web_url(target, p) for p in web_ports]
+    gb_findings = []
+    if web_urls:
+        for wu in web_urls:
+            print(f"[gobuster] brute-forcing {wu}...")
+            gb_result = run_gobuster(wu)
+            found = [] if gb_result.timed_out else parse_gobuster(gb_result)
+            for d in found:
+                d["url"] = wu
+                d["detail"] = f"{wu}{d['path']}"
+            gb_findings.extend(found)
+            print(f"           {len(found)} path(s) found.")
         all_findings["gobuster"] = gb_findings
         db.save_findings(scan_id, "gobuster", gb_findings)
-        print(f"           {len(gb_findings)} path(s) found.")
     else:
         print("[gobuster] no web ports — skipping.")
         all_findings["gobuster"] = []
 
     # 4. nikto
-    if web_ports and not args.skip_nikto:
-        print("[nikto] scanning for web misconfigs (this can take 2-3 min)...")
-        nk_result = run_nikto(target)
-        nk_findings = [] if nk_result.timed_out else parse_nikto(nk_result)
+    nk_findings = []
+    if web_urls and not args.skip_nikto:
+        for wu in web_urls:
+            print(f"[nikto] scanning {wu} for web misconfigs (this can take 2-3 min)...")
+            nk_result = run_nikto(wu)
+            found = [] if nk_result.timed_out else parse_nikto(nk_result)
+            for d in found:
+                d["url"] = wu
+                d["detail"] = f"[{wu}] {d['finding']}"
+            nk_findings.extend(found)
+            print(f"        {len(found)} finding(s).")
         all_findings["nikto"] = nk_findings
         db.save_findings(scan_id, "nikto", nk_findings)
-        print(f"        {len(nk_findings)} finding(s).")
     else:
         all_findings["nikto"] = []
+
+    web_url = web_urls[0] if web_urls else None
 
     # 5. AI Triage
     total = sum(len(v) for v in all_findings.values())
@@ -250,7 +284,7 @@ def main() -> int:
             else:
                 print(f"  → running...")
                 new_findings, result_text = _execute_action(
-                    action["tool"], action["args"], target)
+                    action["tool"], action["args"], target, default_url=web_url)
                 executed = True
                 db.save_findings(scan_id, action["tool"], new_findings)
                 db.log_action(scan_id, item["rank"], action["tool"],
