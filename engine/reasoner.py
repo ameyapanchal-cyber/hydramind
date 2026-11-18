@@ -1,17 +1,24 @@
 """
-AI Reasoner — the strategic core (a strong model: GPT-4o by default, override
-with HYDRAMIND_REASONER_MODEL). Takes the target + raw findings + triage report
-and produces an attack plan: assessment, attack paths and concrete next actions.
+AI Reasoner — the strategic core (GPT-4o by default, override with
+HYDRAMIND_REASONER_MODEL). Reasons about ONE finding at a time, aware of
+sibling findings and the history of already-approved/executed actions for the
+target, so attack chains build step by step — one human-approved action at a
+time — instead of a pre-committed batch plan.
 
-Every action is labeled "passive" (safe recon) or "active" (needs the human
-approval gate). validate_plan() is the safety boundary between the AI and the
-tool executor: nothing runs unless it survives it.
+validate_action() is the safety boundary between the AI and the tool
+executor: nothing runs unless its proposed command survives it (fail-closed).
 """
 from __future__ import annotations
 import json
 import os
 import re
+import shlex
+from dataclasses import dataclass, asdict
+from pathlib import Path
+
 from openai import OpenAI
+
+from engine.findings import Finding
 
 _client = None
 
@@ -23,69 +30,95 @@ def _get_client() -> OpenAI:
         _client = OpenAI()  # reads OPENAI_API_KEY from environment
     return _client
 
+
 # Tools the executor can actually run today vs. ones queued for Phase 3
 KNOWN_TOOLS = {"nmap", "gobuster", "nikto"}
-PHASE3_TOOLS = {"sqlmap", "hydra", "wpscan"}
+PHASE3_TOOLS = {"sqlmap", "hydra", "wpscan", "commix", "metasploit"}
 
 # args that write/read files or otherwise escape the intended scan
 BLOCKED_NMAP_ARGS = {"-oN", "-oX", "-oG", "-oA", "-oS", "-iL", "--datadir",
                      "--excludefile", "--append-output", "--stylesheet"}
-MAX_ACTIONS = 5
 MAX_ARGS = 12
 
+# one CLI token: no shell metacharacters, no spaces, no quotes
 SAFE_ARG = re.compile(r"^[A-Za-z0-9_.,:/@=+\-*]{1,64}$")
 
+RISK_LEVELS = ("passive", "active", "exploit")
+
 SYSTEM_PROMPT = """You are the Reasoner — the strategic core of HydraMind, an
-AUTHORIZED penetration testing pipeline. You receive recon findings
-(nmap, gobuster, nikto) and a triage report from a cheaper junior model,
-and you decide what to do next.
+AUTHORIZED penetration testing pipeline. You receive ONE finding from the
+triage phase, plus context: sibling findings for the same target, and the
+history of already-approved/executed actions and their outcomes for that
+target.
 
-Your job:
-1. Assess the target's overall attack surface.
-2. Propose concrete attack paths worth pursuing.
-3. Propose up to 5 concrete next actions.
+Decide the single best next action. Chains are good — build on what history
+shows succeeded or failed — but propose exactly ONE command.
 
-Classify every action's risk honestly:
-- "passive": safe enumeration of the kind the recon phase already did
+risk_level classification:
+- "passive": enumeration of the kind the recon phase already does
   (deeper nmap version/port scans, bigger gobuster wordlists, nikto).
-- "active": ANYTHING beyond that — credential brute force, injection
-  testing (sqlmap), exploitation, attack payloads. When unsure, say "active".
+- "active": probing beyond passive recon that is not yet exploitation.
+- "exploit": exploitation-class tools (sqlmap/hydra/wpscan/commix) or any
+  payload delivery. These are gated behind environment: lab.
 
-Respond ONLY with valid JSON in this exact format:
+Respond ONLY with valid JSON:
 {
-  "assessment": "<2-3 sentence strategic read of the target>",
-  "attack_paths": [
-    {"title": "<short name>", "steps": ["<step 1>", "<step 2>", "..."]}
-  ],
-  "actions": [
-    {
-      "id": 1,
-      "tool": "nmap|gobuster|nikto|sqlmap|hydra|wpscan",
-      "risk": "passive|active",
-      "target": "<must be EXACTLY the target given in the input>",
-      "args": ["<CLI arguments, one per list item, no target>"],
-      "description": "<one line: what this action does>",
-      "rationale": "<why now, and what we learn either way>"
-    }
-  ],
-  "priority": 1
+  "attack_hypothesis": "<what weakness you hypothesize and why>",
+  "exact_tool_and_command": "<ONE exact command, e.g. 'nmap -p 80,443 10.0.0.5'>",
+  "expected_outcome": "<what result confirms or refutes the hypothesis>",
+  "confidence": 0.7,
+  "risk_level": "passive|active|exploit"
 }
 
-Rules:
-- Max 5 actions, ordered most-valuable-first. "priority" is the id of the
-  single best next action.
-- args must NOT contain credentials, passwords or attack payloads.
-- Do not propose anything against targets other than the one given.
-- Every action must teach us something, even if it fails."""
+Hard rules for exact_tool_and_command:
+- binary must be one of: nmap, gobuster, nikto, sqlmap, hydra, wpscan, commix
+- write the target literally as given in the input — never a placeholder
+- no shell chaining: no ; | && || backticks sudo
+- no file input/output arguments
+- do not repeat an action that history already shows ran
+- if nothing sensible is possible, propose the best passive verification"""
 
 
-def reason(target: str, findings: dict, triage_report: dict) -> dict:
-    """Ask the strong model for an attack plan. Returns raw parsed JSON."""
+@dataclass
+class ReasonerOutput:
+    """Spec contract for the Reasoner's structured output."""
+    attack_hypothesis: str
+    exact_tool_and_command: str
+    expected_outcome: str
+    confidence: float
+    risk_level: str
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+def _clean_text(value, limit=600) -> str:
+    return str(value or "").strip()[:limit]
+
+
+def reason_about_finding(finding: Finding, full_context: dict) -> ReasonerOutput:
+    """
+    finding: the single Finding to reason about.
+    full_context: {
+        "target": str,
+        "sibling_findings": [Finding|dict, ...],
+        "action_history": [ {tool, risk, description, result, executed}, ... ]
+    }
+    Returns a validated ReasonerOutput. The exact_tool_and_command still has
+    to pass validate_action() before anything executes.
+    """
+    target = full_context.get("target", finding.target)
+    siblings = []
+    for s in (full_context.get("sibling_findings") or [])[:10]:
+        siblings.append(s.to_dict() if isinstance(s, Finding) else s)
+    history = (full_context.get("action_history") or [])[:10]
+
     user_msg = json.dumps({
         "target": target,
-        "findings": findings,
-        "triage": triage_report,
-    }, indent=2)
+        "finding": finding.to_dict(),
+        "context": {"sibling_findings": siblings, "action_history": history},
+    }, indent=2, default=str)
+
     model = os.environ.get("HYDRAMIND_REASONER_MODEL", "gpt-4o")
     response = _get_client().chat.completions.create(
         model=model,
@@ -94,102 +127,64 @@ def reason(target: str, findings: dict, triage_report: dict) -> dict:
             {"role": "user", "content": user_msg},
         ],
         temperature=0.3,
+        response_format={"type": "json_object"},  # JSON mode → structured output
     )
-    raw = response.choices[0].message.content.strip()
+    return parse_reasoner_output(response.choices[0].message.content)
+
+
+def parse_reasoner_output(raw: str) -> ReasonerOutput:
+    """Parse + normalize the model's JSON. Fail-safe: unknown/missing risk
+    becomes 'active' (stricter gate default); confidence clamped to [0,1]."""
+    raw = (raw or "").strip()
     if raw.startswith("```"):
         raw = raw.split("```")[1]
         if raw.startswith("json"):
             raw = raw[4:]
-    return json.loads(raw)
+    data = json.loads(raw)
+    if not isinstance(data, dict):
+        raise ValueError("reasoner output is not a JSON object")
+    risk = str(data.get("risk_level") or "").strip().lower()
+    if risk not in RISK_LEVELS:
+        risk = "active"  # fail-safe: unknown risk = stricter approval default
+    try:
+        confidence = float(data.get("confidence", 0.0))
+    except (TypeError, ValueError):
+        confidence = 0.0
+    confidence = min(max(confidence, 0.0), 1.0)
+    return ReasonerOutput(
+        attack_hypothesis=_clean_text(data.get("attack_hypothesis")),
+        exact_tool_and_command=_clean_text(data.get("exact_tool_and_command"), 300),
+        expected_outcome=_clean_text(data.get("expected_outcome")),
+        confidence=confidence,
+        risk_level=risk,
+    )
 
 
-def _clean_text(value, limit=300) -> str:
-    return str(value or "").strip()[:limit]
-
-
-def _check_args(tool: str, args) -> tuple[list | None, list]:
-    """Validate CLI args fail-closed: one bad token rejects the whole action
-    (a half-sanitized list can leave dangling flag values that tools would
-    misread — e.g. a blocked '-oN' followed by its file path, which nmap
-    would then treat as a target). Returns (args, problems) or (None, problems)."""
-    problems = []
-    if not isinstance(args, list):
-        return None, ["args is not a list"]
-    if len(args) > MAX_ARGS:
-        return None, [f"too many args ({len(args)})"]
+def validate_action(command: str, target: str) -> dict | None:
+    """
+    Safety boundary for ONE proposed command. Fail-closed: any bad token
+    rejects the whole action. Returns {"tool", "args", "command"} or None.
+    """
+    try:
+        tokens = shlex.split(command or "")
+    except ValueError:
+        return None
+    if not tokens:
+        return None
+    tool = Path(tokens[0]).name.lower()
+    if tool not in KNOWN_TOOLS | PHASE3_TOOLS:
+        return None
+    args = tokens[1:]
+    if not args or len(args) > MAX_ARGS:
+        return None
     for a in args:
-        a = str(a).strip()
-        if not a or not SAFE_ARG.match(a):
-            return None, [f"unsafe arg: {a!r}"]
+        if not SAFE_ARG.match(a):
+            return None
         if tool == "nmap" and (a in BLOCKED_NMAP_ARGS
                                or a.startswith("--datadir")
                                or a.startswith("--excludefile")):
-            return None, [f"blocked arg: {a!r}"]
-    return [str(a).strip() for a in args], problems
-
-
-def validate_plan(plan: dict, target: str) -> dict:
-    """
-    Safety boundary: normalize the model's plan and reject anything that
-    doesn't survive it. Only this validated structure reaches the executor.
-    """
-    if not isinstance(plan, dict):
-        return {"assessment": "", "attack_paths": [], "actions": [],
-                "priority": None, "rejected": ["plan is not a JSON object"]}
-
-    rejected: list[str] = []
-    assessment = _clean_text(plan.get("assessment"), 600)
-
-    attack_paths = []
-    for p in (plan.get("attack_paths") or [])[:5]:
-        if isinstance(p, dict) and p.get("title"):
-            steps = [_clean_text(s, 200) for s in (p.get("steps") or [])[:8] if s]
-            attack_paths.append({"title": _clean_text(p.get("title"), 120),
-                                 "steps": steps})
-
-    actions = []
-    next_id = 1
-    raw_actions = plan.get("actions") or []
-    if not isinstance(raw_actions, list):
-        raw_actions = []
-    if len(raw_actions) > MAX_ACTIONS:
-        rejected.append(f"plan had {len(raw_actions)} actions — kept first {MAX_ACTIONS}")
-    for a in raw_actions[:MAX_ACTIONS]:
-        if not isinstance(a, dict):
-            rejected.append("dropped non-object action")
-            continue
-        tool = str(a.get("tool") or "").strip().lower()
-        if tool not in KNOWN_TOOLS | PHASE3_TOOLS:
-            rejected.append(f"action {next_id}: unknown tool '{tool}' → manual")
-            tool = "manual"
-        risk = str(a.get("risk") or "").strip().lower()
-        if risk not in ("passive", "active"):
-            rejected.append(f"action {next_id}: bad risk '{risk}' → treated as active")
-            risk = "active"  # fail-safe: unknown risk = needs approval
-        a_target = str(a.get("target") or "").strip().lower()
-        if a_target != target:
-            rejected.append(f"action {next_id}: target '{a_target}' != scoped "
-                            f"target '{target}' → DROPPED")
-            continue
-        args, problems = _check_args(tool, a.get("args"))
-        if args is None:
-            rejected.extend(f"action {next_id}: {p}" for p in problems)
-            rejected.append(f"action {next_id}: DROPPED (bad args)")
-            continue
-        actions.append({
-            "id": next_id,
-            "tool": tool,
-            "risk": risk,
-            "target": target,
-            "args": args,
-            "description": _clean_text(a.get("description"), 200),
-            "rationale": _clean_text(a.get("rationale"), 300),
-        })
-        next_id += 1
-
-    priority = plan.get("priority")
-    if not isinstance(priority, int) or not any(x["id"] == priority for x in actions):
-        priority = actions[0]["id"] if actions else None
-
-    return {"assessment": assessment, "attack_paths": attack_paths,
-            "actions": actions, "priority": priority, "rejected": rejected}
+            return None
+    # the command must actually aim at the scoped target
+    if not any(target.lower() in a.lower() for a in args):
+        return None
+    return {"tool": tool, "args": args, "command": command.strip()}
