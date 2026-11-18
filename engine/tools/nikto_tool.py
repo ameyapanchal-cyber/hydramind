@@ -6,7 +6,9 @@ from engine.runner import run_tool, ToolResult
 def run_nikto(target: str, timeout: int = 180):
     if not target.startswith("http"):
         target = f"http://{target}"
-    cmd = ["nikto", "-h", target, "-nointeractive", "-Format", "txt"]
+    # no -Format: plain text goes to stdout; -Format would make nikto write
+    # nikto_*.txt files into the working directory as a side effect
+    cmd = ["nikto", "-h", target, "-nointeractive"]
     return run_tool(cmd, timeout=timeout)
 
 

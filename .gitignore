@@ -5,3 +5,4 @@ __pycache__/
 data/*.db
 data/report_*.json
 .env
+nikto_*.txt
