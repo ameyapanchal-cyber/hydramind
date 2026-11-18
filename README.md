@@ -109,10 +109,25 @@ All four decisions are queryable in `reasoner_decisions` (finding FK, command,
 confidence, decision, rejection reason, result). The full report is
 `data/report_2.json`.
 
+## Lab targets (local, scope-listed, `environment: lab`)
+
+| Target | Service | Status |
+|---|---|---|
+| `127.0.0.1:3000` | OWASP Juice Shop | HTTP 200 |
+| `127.0.0.1:6379` | Redis 4.0.14 | unauthenticated (owner-reported PONG) |
+| `127.0.0.1:8080` | Apache httpd 2.4.49 | CVE-2021-41773 traversal/RCE (owner-reported) |
+| `127.0.0.1:8081` | DVWA v1.10 | admin/password, security low |
+
+Planned infrastructure: public-IP lab host (GitHub Student benefits) and
+Metasploit setup, so tests can run beyond localhost.
+
 ## Roadmap
 - Phase 0 (done): scope firewall + nmap engine + SQLite store
 - Phase 1 (done): gobuster + nikto + AI triage
 - Phase 2 (done): per-finding AI reasoner + human approval gate + two-stage scope policy
-- Phase 3: sqlmap/hydra/wpscan/commix (labs only, extra-gated) + execution wiring
+- Phase 3 (next, awaits go-ahead): exploitation modules — sqlmap, Apache
+  CVE-2021-41773, Redis unauthenticated, hydra, wpscan, commix — all
+  lab-only, behind the same approval gate + `check_tool` policy
 - Phase 4: validator + report writer + PortSwigger eval
 - Phase 5: n8n trigger/notify + dashboard
+- Phase 6: LangGraph agent + RAG (CVE/ExploitDB) + model router
