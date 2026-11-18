@@ -21,6 +21,7 @@ from engine import db
 SCOPE_FILE = Path(__file__).resolve().parent / "config" / "scope.yaml"
 GOBUSTER_WORDLIST_ROOT = Path("/usr/share/wordlists")
 REASONER_MODEL = os.environ.get("HYDRAMIND_REASONER_MODEL", "gpt-4o")
+WEB_PORTS = (80, 443, 3000, 5000, 8000, 8080, 8081, 8443, 8888, 9000)
 
 
 def _ask(msg: str, default_yes: bool) -> bool:
@@ -137,7 +138,11 @@ def main() -> int:
     print(f"       {len(nmap_findings)} open port(s) found.")
 
     # 3. gobuster (one pass per discovered web port)
-    web_ports = [f["port"] for f in nmap_findings if f["port"] in (80, 443, 8080, 8443, 8081)]
+    seen = set()
+    web_ports = [f["port"] for f in nmap_findings
+                 if (f["port"] in WEB_PORTS
+                     or str(f.get("service") or "").startswith("http"))
+                 and not (f["port"] in seen or seen.add(f["port"]))]
     web_urls = [_web_url(target, p) for p in web_ports]
     gb_findings = []
     if web_urls:
