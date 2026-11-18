@@ -14,7 +14,12 @@ def parse_nikto(result: ToolResult) -> list[dict]:
     findings = []
     for line in result.stdout.splitlines():
         line = line.strip()
-        # Nikto findings start with "+ "
-        if line.startswith("+ ") and "OSVDB" not in line and line != "+":
-            findings.append({"finding": line[2:]})
+        # Nikto findings start with "+ ". Skip OSVDB refs and failure/error
+        # notices (e.g. "+ [FAIL] Unable to connect to host:port") — those
+        # are not findings.
+        if not line.startswith("+ ") or line == "+" or "OSVDB" in line:
+            continue
+        if line[2:].startswith(("[FAIL]", "[ERROR]")):
+            continue
+        findings.append({"finding": line[2:]})
     return findings

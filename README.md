@@ -56,8 +56,58 @@ Every allow/deny decision is logged to the `scope_events` table.
   Phase 3 wires actual execution behind the same gate.
 - Model override: `HYDRAMIND_REASONER_MODEL=gpt-4o`
 
-Demo transcript: pending — will be added after the first full run against the
-lab VM (Metasploitable2/DVWA) once it is reachable and scope-listed.
+Demo transcript: see below. First full live run: DVWA lab (Docker container on
+this Kali VM, `http://127.0.0.1:8081`), 2026-11-18.
+
+### Demo run — DVWA lab (real terminal output, trimmed)
+
+```text
+[scope] '127.0.0.1' authorized.
+
+[nmap] scanning ports + services...
+       3 open port(s) found.            # 3000, 8080 (Apache 2.4.49), 8081 (DVWA / Apache 2.4.25)
+[gobuster] brute-forcing http://127.0.0.1:8080...
+           5 path(s) found.
+[gobuster] brute-forcing http://127.0.0.1:8081...
+           12 path(s) found.            # /config, /docs, /external, /php.ini, ...
+[nikto] scanning http://127.0.0.1:8080 ... 0 finding(s).
+[nikto] scanning http://127.0.0.1:8081 ... 0 finding(s).   # DVWA needs auth; nikto sees little
+
+[triager] sending 20 finding(s) to GPT-4o-mini for analysis...
+  [HIGH]   #1 Apache httpd 2.4.49 detected
+  [MEDIUM] #2 Apache httpd 2.4.25 detected
+  [MEDIUM] #3 php.ini file accessible at /php.ini
+  [LOW]    #4 sensitive paths: /config, /docs, /external
+
+--- Finding #1 [HIGH] Apache httpd version 2.4.49 detected
+  hypothesis : ...CVE-2021-41773 path traversal...
+  command    : nikto -h http://127.0.0.1
+  expected   : confirm known vulns/misconfigs
+  confidence : 70%   risk: passive
+    Approve action for finding #1? [Y/n]   → running...
+  → done: rc=0, 1 finding(s) @ http://127.0.0.1
+
+--- Finding #2 [MEDIUM] Apache httpd version 2.4.25 detected
+  command    : nikto -h http://127.0.0.1
+    Approve action for finding #2? [Y/n]   rejection reason (one line):
+      → "Duplicate of #1; port 80 closed — use :8081/:8080"
+
+--- Finding #3 [MEDIUM] php.ini file accessible at /php.ini
+  command    : nikto -h http://127.0.0.1:8080
+    Approve action for finding #3? [Y/n]   rejection reason (one line):
+      → "Duplicate of recon nikto on :8080; php.ini lives on :8081"
+
+--- Finding #4 [LOW] Potential sensitive paths found: /config, /docs, /external
+  command    : nikto -h http://127.0.0.1:8080 -C all
+    Approve action for finding #4? [Y/n]   rejection reason (one line):
+      → "Paths discovered on :8081; :8080 already nikto-scanned"
+
+[db] full report saved → data/report_2.json
+```
+
+All four decisions are queryable in `reasoner_decisions` (finding FK, command,
+confidence, decision, rejection reason, result). The full report is
+`data/report_2.json`.
 
 ## Roadmap
 - Phase 0 (done): scope firewall + nmap engine + SQLite store

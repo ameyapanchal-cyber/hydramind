@@ -1,41 +1,153 @@
 {
-  "target": "scanme.nmap.org",
+  "target": "127.0.0.1",
   "raw": {
     "nmap": [
       {
-        "host": "45.33.32.156",
-        "port": 22,
+        "host": "127.0.0.1",
+        "port": 3000,
         "protocol": "tcp",
-        "service": "ssh",
-        "product": "OpenSSH",
-        "version": "6.6.1p1 Ubuntu 2ubuntu2.13"
+        "service": "ppp",
+        "product": null,
+        "version": null
       },
       {
-        "host": "45.33.32.156",
-        "port": 80,
+        "host": "127.0.0.1",
+        "port": 8080,
         "protocol": "tcp",
         "service": "http",
         "product": "Apache httpd",
-        "version": "2.4.7"
+        "version": "2.4.49"
       },
       {
-        "host": "45.33.32.156",
-        "port": 9929,
+        "host": "127.0.0.1",
+        "port": 8081,
         "protocol": "tcp",
-        "service": "nping-echo",
-        "product": "Nping echo",
-        "version": null
-      },
-      {
-        "host": "45.33.32.156",
-        "port": 31337,
-        "protocol": "tcp",
-        "service": "tcpwrapped",
-        "product": null,
-        "version": null
+        "service": "http",
+        "product": "Apache httpd",
+        "version": "2.4.25"
       }
     ],
-    "gobuster": [],
+    "gobuster": [
+      {
+        "path": "/.htpasswd",
+        "status": 403,
+        "size": 199,
+        "url": "http://127.0.0.1:8080",
+        "detail": "http://127.0.0.1:8080/.htpasswd"
+      },
+      {
+        "path": "/.htaccess",
+        "status": 403,
+        "size": 199,
+        "url": "http://127.0.0.1:8080",
+        "detail": "http://127.0.0.1:8080/.htaccess"
+      },
+      {
+        "path": "/.hta",
+        "status": 403,
+        "size": 199,
+        "url": "http://127.0.0.1:8080",
+        "detail": "http://127.0.0.1:8080/.hta"
+      },
+      {
+        "path": "/cgi-bin/",
+        "status": 403,
+        "size": 199,
+        "url": "http://127.0.0.1:8080",
+        "detail": "http://127.0.0.1:8080/cgi-bin/"
+      },
+      {
+        "path": "/index.html",
+        "status": 200,
+        "size": 45,
+        "url": "http://127.0.0.1:8080",
+        "detail": "http://127.0.0.1:8080/index.html"
+      },
+      {
+        "path": "/.htpasswd",
+        "status": 403,
+        "size": 295,
+        "url": "http://127.0.0.1:8081",
+        "detail": "http://127.0.0.1:8081/.htpasswd"
+      },
+      {
+        "path": "/.htaccess",
+        "status": 403,
+        "size": 295,
+        "url": "http://127.0.0.1:8081",
+        "detail": "http://127.0.0.1:8081/.htaccess"
+      },
+      {
+        "path": "/.hta",
+        "status": 403,
+        "size": 290,
+        "url": "http://127.0.0.1:8081",
+        "detail": "http://127.0.0.1:8081/.hta"
+      },
+      {
+        "path": "/config",
+        "status": 301,
+        "size": 314,
+        "url": "http://127.0.0.1:8081",
+        "detail": "http://127.0.0.1:8081/config"
+      },
+      {
+        "path": "/docs",
+        "status": 301,
+        "size": 312,
+        "url": "http://127.0.0.1:8081",
+        "detail": "http://127.0.0.1:8081/docs"
+      },
+      {
+        "path": "/external",
+        "status": 301,
+        "size": 316,
+        "url": "http://127.0.0.1:8081",
+        "detail": "http://127.0.0.1:8081/external"
+      },
+      {
+        "path": "/favicon.ico",
+        "status": 200,
+        "size": 1406,
+        "url": "http://127.0.0.1:8081",
+        "detail": "http://127.0.0.1:8081/favicon.ico"
+      },
+      {
+        "path": "/index.php",
+        "status": 302,
+        "size": 0,
+        "url": "http://127.0.0.1:8081",
+        "detail": "http://127.0.0.1:8081/index.php"
+      },
+      {
+        "path": "/php.ini",
+        "status": 200,
+        "size": 148,
+        "url": "http://127.0.0.1:8081",
+        "detail": "http://127.0.0.1:8081/php.ini"
+      },
+      {
+        "path": "/phpinfo.php",
+        "status": 302,
+        "size": 0,
+        "url": "http://127.0.0.1:8081",
+        "detail": "http://127.0.0.1:8081/phpinfo.php"
+      },
+      {
+        "path": "/robots.txt",
+        "status": 200,
+        "size": 26,
+        "url": "http://127.0.0.1:8081",
+        "detail": "http://127.0.0.1:8081/robots.txt"
+      },
+      {
+        "path": "/server-status",
+        "status": 403,
+        "size": 299,
+        "url": "http://127.0.0.1:8081",
+        "detail": "http://127.0.0.1:8081/server-status"
+      }
+    ],
     "nikto": []
   },
   "triage": {
@@ -44,19 +156,79 @@
         "rank": 1,
         "severity": "HIGH",
         "source": "nmap",
-        "finding": "OpenSSH 6.6.1p1 on port 22",
-        "why": "This version of OpenSSH is outdated and may contain known vulnerabilities that could be exploited for unauthorized access or privilege escalation.",
-        "next_step": "Attempt to exploit known vulnerabilities or perform a brute-force attack on SSH."
+        "finding": "Apache httpd version 2.4.49 detected",
+        "why": "This version of Apache has known vulnerabilities that could be exploited, making it critical to assess its security posture.",
+        "next_step": "Investigate known vulnerabilities for Apache 2.4.49 and assess the server configuration."
       },
       {
         "rank": 2,
         "severity": "MEDIUM",
         "source": "nmap",
-        "finding": "Apache httpd 2.4.7 on port 80",
-        "why": "Apache 2.4.7 is also an outdated version that may have vulnerabilities, including potential remote code execution or denial of service attacks.",
-        "next_step": "Run a vulnerability scan against the Apache server to identify specific weaknesses."
+        "finding": "Apache httpd version 2.4.25 detected",
+        "why": "This version is outdated and may contain vulnerabilities that could be exploited by attackers.",
+        "next_step": "Check for vulnerabilities associated with Apache 2.4.25 and review the server's security settings."
+      },
+      {
+        "rank": 3,
+        "severity": "MEDIUM",
+        "source": "gobuster",
+        "finding": "php.ini file accessible at /php.ini",
+        "why": "The php.ini file can expose sensitive configuration details that could aid an attacker in exploiting the server.",
+        "next_step": "Review the contents of the php.ini file for sensitive information and restrict access to it."
+      },
+      {
+        "rank": 4,
+        "severity": "LOW",
+        "source": "gobuster",
+        "finding": "Potential sensitive paths found: /config, /docs, /external",
+        "why": "These paths may contain sensitive information or resources that could be useful for an attacker.",
+        "next_step": "Investigate the contents of these directories to ensure they do not expose sensitive information."
       }
     ],
-    "summary": "The findings indicate the presence of outdated services that could be exploited. The SSH service is particularly concerning due to its critical nature and known vulnerabilities. Immediate action should be taken to assess and exploit these weaknesses."
-  }
+    "summary": "The findings indicate the presence of outdated Apache versions with known vulnerabilities, as well as accessible configuration files that could lead to security breaches. Immediate action should be taken to assess and mitigate these risks."
+  },
+  "decisions": [
+    {
+      "attack_hypothesis": "Apache httpd version 2.4.49 is known to have a critical path traversal vulnerability (CVE-2021-41773) that could allow an attacker to access restricted files on the server. The presence of paths like /.htpasswd and /.htaccess, which return HTTP 403, suggests that these files are protected but could potentially be accessed via path traversal.",
+      "exact_tool_and_command": "nikto -h http://127.0.0.1",
+      "expected_outcome": "Nikto will identify any known vulnerabilities or misconfigurations in the Apache server, including the path traversal vulnerability, confirming whether the server is susceptible to exploitation.",
+      "confidence": 0.7,
+      "risk_level": "passive",
+      "rank": 1,
+      "human_decision": "approved",
+      "status": "approved",
+      "executed": true,
+      "result": "rc=0, 1 finding(s) @ http://127.0.0.1"
+    },
+    {
+      "attack_hypothesis": "The outdated Apache httpd version 2.4.25 might have known vulnerabilities that could be exploited, such as directory traversal or other configuration issues. Given the presence of protected paths like /.htpasswd and /.htaccess, further investigation into potential vulnerabilities is warranted.",
+      "exact_tool_and_command": "nikto -h http://127.0.0.1",
+      "expected_outcome": "Identify specific vulnerabilities or misconfigurations in the Apache server that could be exploited, such as directory traversal or outdated modules.",
+      "confidence": 0.7,
+      "risk_level": "passive",
+      "rank": 2,
+      "human_decision": "rejected",
+      "rejection_reason": "Duplicate of #1; port 80 closed \u2014 use :8081/:8080"
+    },
+    {
+      "attack_hypothesis": "The Apache httpd 2.4.49 server on port 8080 may be vulnerable to a path traversal attack, which could allow access to sensitive files like php.ini.",
+      "exact_tool_and_command": "nikto -h http://127.0.0.1:8080",
+      "expected_outcome": "Identify if the Apache server on port 8080 is vulnerable to path traversal, confirming potential access to sensitive files.",
+      "confidence": 0.7,
+      "risk_level": "passive",
+      "rank": 3,
+      "human_decision": "rejected",
+      "rejection_reason": "Duplicate of recon nikto on :8080; php.ini lives on :8081"
+    },
+    {
+      "attack_hypothesis": "The Apache httpd version 2.4.49 on port 8080 is vulnerable to a path traversal attack (CVE-2021-41773), which could allow access to sensitive files. The presence of sensitive paths like /config, /docs, and /external suggests they might be accessible via this vulnerability.",
+      "exact_tool_and_command": "nikto -h http://127.0.0.1:8080 -C all",
+      "expected_outcome": "Identify if the sensitive paths /config, /docs, and /external can be accessed or if there are other vulnerabilities present due to the path traversal issue.",
+      "confidence": 0.7,
+      "risk_level": "passive",
+      "rank": 4,
+      "human_decision": "rejected",
+      "rejection_reason": "Paths discovered on :8081; :8080 already nikto-scanned"
+    }
+  ]
 }

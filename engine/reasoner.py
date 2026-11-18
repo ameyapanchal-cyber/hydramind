@@ -73,6 +73,8 @@ Respond ONLY with valid JSON:
 Hard rules for exact_tool_and_command:
 - binary must be one of: nmap, gobuster, nikto, sqlmap, hydra, wpscan, commix
 - write the target literally as given in the input — never a placeholder
+- if the findings reference a non-standard web port, use that exact URL in the
+  command (e.g. http://host:8081) — never silently assume port 80
 - no shell chaining: no ; | && || backticks sudo
 - no file input/output arguments
 - do not repeat an action that history already shows ran
