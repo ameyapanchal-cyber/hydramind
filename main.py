@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """HydraMind — Phase 2. Usage: python3 main.py --target scanme.nmap.org
 
-Pipeline: recon (nmap/gobuster/nikto) → AI triage → AI reasoner →
-HUMAN APPROVAL GATE → execute approved actions (labs only) → report."""
+Pipeline: scope check -> recon (nmap/gobuster/nikto, all logged) -> AI triage
+-> per-finding AI Reasoner (GPT-4o) -> HUMAN APPROVAL GATE -> approved passive
+actions execute; exploitation-class tools are logged and queued for Phase 3
+(labs only) -> report."""
 from __future__ import annotations
 import argparse, json, os, sys
 from pathlib import Path
@@ -11,7 +13,9 @@ from engine.tools.nmap_tool import run_nmap, parse_nmap
 from engine.tools.gobuster_tool import run_gobuster, parse_gobuster, DEFAULT_WORDLIST
 from engine.tools.nikto_tool import run_nikto, parse_nikto
 from engine.triager import triage
-from engine.reasoner import reason, validate_plan, KNOWN_TOOLS, PHASE3_TOOLS
+from engine.reasoner import (reason_about_finding, validate_action,
+                             KNOWN_TOOLS)
+from engine.findings import finding_from_tool, finding_from_triage
 from engine import db
 
 SCOPE_FILE = Path(__file__).resolve().parent / "config" / "scope.yaml"
@@ -20,8 +24,8 @@ REASONER_MODEL = os.environ.get("HYDRAMIND_REASONER_MODEL", "gpt-4o")
 
 
 def _ask(msg: str, default_yes: bool) -> bool:
-    """Approval prompt. Passive actions default to yes, active to NO —
-    the human must type 'y' for anything risky."""
+    """Approval prompt. Passive findings default to yes, everything else to
+    NO — the human must type 'y' for anything risky. EOF/no input = never."""
     suffix = "[Y/n]" if default_yes else "[y/N]"
     try:
         ans = input(f"  {msg} {suffix} ").strip().lower()
@@ -30,8 +34,16 @@ def _ask(msg: str, default_yes: bool) -> bool:
     return ans in ("y", "yes") if ans else default_yes
 
 
+def _rejection_reason() -> str:
+    try:
+        reason = input("  rejection reason (one line): ").strip()
+    except EOFError:
+        reason = ""
+    return reason or "(no reason given)"
+
+
 def _wordlist_from_args(args: list[str]) -> str:
-    """Pull -w <path> out of a gobuster action; only allow Kali wordlists.
+    """Pull -w <path> out of a gobuster command; only allow Kali wordlists.
     (Both sides are resolved: /usr/share/wordlists/* are often symlinks.)"""
     for i, a in enumerate(args):
         if a == "-w" and i + 1 < len(args):
@@ -44,26 +56,25 @@ def _wordlist_from_args(args: list[str]) -> str:
     return DEFAULT_WORDLIST
 
 
-def _execute_action(action: dict, target: str) -> tuple[list[dict], str]:
-    """Run an approved action through runner.py. Returns (findings, summary)."""
-    tool, args = action["tool"], action["args"]
-
+def _execute_action(tool: str, args: list[str], target: str) -> tuple[list[dict], str]:
+    """Run an approved, validated action through runner.py.
+    Returns (findings, summary)."""
     if tool == "nmap":
-        result, xml_path = run_nmap(target, extra_args=args or None)
+        extra = [a for a in args if target.lower() not in a.lower()]
+        result, xml_path = run_nmap(target, extra_args=extra or None)
         findings = [] if result.timed_out else parse_nmap(xml_path)
         status = "timed out" if result.timed_out else f"rc={result.returncode}"
         return findings, f"{status}, {len(findings)} finding(s)"
 
     if tool == "gobuster":
-        wordlist = _wordlist_from_args(args)
-        result = run_gobuster(target, wordlist=wordlist)
-        findings = parse_gobuster(result)
+        result = run_gobuster(target, wordlist=_wordlist_from_args(args))
+        findings = [] if result.timed_out else parse_gobuster(result)
         status = "timed out" if result.timed_out else f"rc={result.returncode}"
-        return findings, f"{status}, {len(findings)} path(s), wl={wordlist}"
+        return findings, f"{status}, {len(findings)} path(s)"
 
     if tool == "nikto":
         result = run_nikto(target)
-        findings = parse_nikto(result)
+        findings = [] if result.timed_out else parse_nikto(result)
         status = "timed out" if result.timed_out else f"rc={result.returncode}"
         return findings, f"{status}, {len(findings)} finding(s)"
 
@@ -83,15 +94,18 @@ def main() -> int:
     ap.add_argument("--skip-nikto", action="store_true", help="skip nikto (slow)")
     args = ap.parse_args()
 
-    # 1. Scope gate
+    # 1. Scope gate (stage 1: host authorization)
     fw = ScopeFirewall(SCOPE_FILE)
     try:
         target = fw.check(args.target)
     except ScopeError as e:
+        db.init_db()
+        db.log_scope_event(args.target, "recon", False, str(e))
         print(f"\n{e}\n"); return 1
+    db.init_db()
+    db.log_scope_event(target, "recon", True, "")
     print(f"[scope] '{target}' authorized.\n")
 
-    db.init_db()
     scan_id = db.new_scan(target, tool="phase2")
     all_findings = {}
 
@@ -108,7 +122,7 @@ def main() -> int:
     if web_ports:
         print(f"[gobuster] web port(s) found — brute-forcing directories...")
         gb_result = run_gobuster(target)
-        gb_findings = parse_gobuster(gb_result)
+        gb_findings = [] if gb_result.timed_out else parse_gobuster(gb_result)
         all_findings["gobuster"] = gb_findings
         db.save_findings(scan_id, "gobuster", gb_findings)
         print(f"           {len(gb_findings)} path(s) found.")
@@ -120,7 +134,7 @@ def main() -> int:
     if web_ports and not args.skip_nikto:
         print("[nikto] scanning for web misconfigs (this can take 2-3 min)...")
         nk_result = run_nikto(target)
-        nk_findings = parse_nikto(nk_result)
+        nk_findings = [] if nk_result.timed_out else parse_nikto(nk_result)
         all_findings["nikto"] = nk_findings
         db.save_findings(scan_id, "nikto", nk_findings)
         print(f"        {len(nk_findings)} finding(s).")
@@ -142,98 +156,129 @@ def main() -> int:
     print("  HYDRAMIND — TRIAGE REPORT")
     print("="*60)
     print(f"\n{triage_report.get('summary', '')}\n")
-    for item in triage_report.get("ranked_findings", []):
+    ranked = triage_report.get("ranked_findings", [])
+    for item in ranked:
         sev = item.get("severity", "?")
         print(f"[{sev}] #{item['rank']} — {item['finding']}")
         print(f"       Why: {item['why']}")
         print(f"       Next: {item['next_step']}\n")
 
-    # 6. AI Reasoner (strong model) — attack plan
-    print(f"[reasoner] asking {REASONER_MODEL} for an attack plan...")
-    try:
-        plan = validate_plan(reason(target, all_findings, triage_report), target)
-    except Exception as e:
-        print(f"[reasoner] AI call failed: {e}{_ai_fail_hint(e)}"); return 1
-    for note in plan["rejected"]:
-        print(f"  [plan-guard] {note}")
+    # Persist triage items so reasoner_decisions can FK to them
+    triage_ids = db.save_triage_findings(scan_id, ranked)
 
-    print("\n" + "="*60)
-    print("  HYDRAMIND — ATTACK PLAN (Reasoner)")
+    # 6. Per-finding Reasoner + HUMAN APPROVAL GATE
     print("="*60)
-    print(f"\n{plan['assessment']}\n")
-    for path in plan["attack_paths"]:
-        print(f"  Path: {path['title']}")
-        for i, step in enumerate(path["steps"], 1):
-            print(f"     {i}. {step}")
-    if not plan["actions"]:
-        print("\n[reasoner] No safe next actions proposed. Pipeline done.")
-        _save_report(scan_id, target, all_findings, triage_report, plan, [])
-        return 0
-    print(f"\n  Proposed actions (priority: #{plan['priority']}):")
-    for a in plan["actions"]:
-        risk = "ACTIVE" if a["risk"] == "active" else "passive"
-        cmd = f"{a['tool']} {' '.join(a['args'])}".strip()
-        print(f"\n  #{a['id']} [{risk}] {a['description']}")
-        print(f"       cmd: {cmd} {a['target']}")
-        print(f"       why: {a['rationale']}")
-
-    # 7. HUMAN APPROVAL GATE — nothing risky runs without an explicit 'y'
-    print("\n" + "="*60)
-    print("  APPROVAL GATE — you are the human in the loop")
+    print(f"  REASONER ({REASONER_MODEL}) + APPROVAL GATE — one finding at a time")
     print("="*60)
-    action_results = []
-    for a in plan["actions"]:
-        is_active = a["risk"] == "active"
-        approved, executed, result, status = False, False, "", ""
-        print(f"\n  Action #{a['id']} [{a['risk']}] {a['tool']}: {a['description']}")
+    decisions = []
+    for item, finding_id in zip(ranked, triage_ids):
+        finding = finding_from_triage(item, target)
+        siblings = [finding_from_tool(t, target, d).to_dict()
+                    for t, lst in all_findings.items() for d in lst
+                    if t != finding.tool][:10]
+        context = {
+            "target": target,
+            "sibling_findings": siblings,
+            "action_history": db.action_history(target),
+        }
 
-        if not _ask(f"  Approve action #{a['id']}?", default_yes=not is_active):
-            status = "rejected"
-            print(f"       → skipped (not approved).")
-        elif a["tool"] not in KNOWN_TOOLS:
-            approved = True
-            status = "queued-phase3"
-            print(f"       → [phase3] {a['tool']} approved + queued "
-                  f"(not implemented yet).")
-        else:
-            approved = True
-            # defense in depth: re-check scope right before every execution
+        print(f"\n--- Finding #{item['rank']} [{item.get('severity', '?')}] "
+              f"{item['finding']}")
+        try:
+            out = reason_about_finding(finding, context)
+        except Exception as e:
+            print(f"[reasoner] AI call failed: {e}{_ai_fail_hint(e)}"); return 1
+
+        action = validate_action(out.exact_tool_and_command, target)
+        guard = "" if action else "  [guard] proposed command failed safety validation — will NOT run"
+        print(f"  hypothesis : {out.attack_hypothesis}")
+        print(f"  command    : {out.exact_tool_and_command}")
+        print(f"  expected   : {out.expected_outcome}")
+        print(f"  confidence : {out.confidence:.0%}   risk: {out.risk_level}")
+        if guard:
+            print(guard)
+
+        approved = _ask(f"  Approve action for finding #{item['rank']}?",
+                        default_yes=(out.risk_level == "passive"))
+        if not approved:
+            reason = _rejection_reason()
+            db.log_reasoner_decision(finding_id, out.attack_hypothesis,
+                                     out.exact_tool_and_command, out.confidence,
+                                     out.risk_level, "rejected",
+                                     rejection_reason=reason)
+            decisions.append({**out.to_dict(), "rank": item["rank"],
+                              "human_decision": "rejected",
+                              "rejection_reason": reason})
+            continue
+
+        executed, result_text, status = False, "", "approved"
+        if action is None:
+            result_text = "not executed: proposed command failed safety validation"
+            status = "guard-rejected"
+        elif action["tool"] not in KNOWN_TOOLS:
+            # exploitation-class / phase-3 tool: approve + log + queue, NEVER run here
             try:
-                fw.check(a["target"])
+                fw.check_tool(target, action["tool"])
+                print(f"  → [phase3] {action['tool']} approved + queued "
+                      f"(not implemented yet) — stopping pipeline.")
+                db.log_action(scan_id, item["rank"], action["tool"],
+                              out.risk_level, out.attack_hypothesis,
+                              approved=True, executed=False)
+                status = "queued-phase3"
             except ScopeError as e:
-                result = f"scope-blocked: {e}"
-                status = "blocked"
-                print(f"       → BLOCKED: {e}")
+                result_text = str(e)
+                status = "scope-blocked"
+                print(f"  → BLOCKED: {e}")
+            if status == "queued-phase3":
+                db.log_reasoner_decision(finding_id, out.attack_hypothesis,
+                                         out.exact_tool_and_command, out.confidence,
+                                         out.risk_level, "approved",
+                                         result="queued for Phase 3")
+                decisions.append({**out.to_dict(), "rank": item["rank"],
+                                  "human_decision": "approved",
+                                  "status": status})
+                break  # nothing executes past this point until Phase 3
+        else:
+            # stage 2: per-tool authorization + stage-1 re-check
+            try:
+                fw.check(target)
+                fw.check_tool(target, action["tool"])
+            except ScopeError as e:
+                result_text = str(e)
+                status = "scope-blocked"
+                print(f"  → BLOCKED: {e}")
             else:
-                print(f"       → running...")
-                findings, result = _execute_action(a, target)
+                print(f"  → running...")
+                new_findings, result_text = _execute_action(
+                    action["tool"], action["args"], target)
                 executed = True
-                status = "executed"
-                db.save_findings(scan_id, a["tool"], findings)
-                print(f"       → done: {result}")
-                action_results.append({**a, "status": status,
-                                       "summary": result, "new_findings": findings})
+                db.save_findings(scan_id, action["tool"], new_findings)
+                db.log_action(scan_id, item["rank"], action["tool"],
+                              out.risk_level, out.attack_hypothesis,
+                              approved=True, executed=True, result=result_text)
+                print(f"  → done: {result_text}")
+                for f in new_findings[:5]:
+                    nf = finding_from_tool(action["tool"], target, f)
+                    print(f"     + {nf.title}")
 
-        db.log_action(scan_id, a["id"], a["tool"], a["risk"], a["description"],
-                      approved=approved, executed=executed, result=result)
-        if status != "executed":
-            action_results.append({**a, "status": status})
+        db.log_reasoner_decision(finding_id, out.attack_hypothesis,
+                                 out.exact_tool_and_command, out.confidence,
+                                 out.risk_level, "approved",
+                                 executed=executed, result=result_text)
+        decisions.append({**out.to_dict(), "rank": item["rank"],
+                          "human_decision": "approved", "status": status,
+                          "executed": executed, "result": result_text})
 
-    # 8. Save full report
-    _save_report(scan_id, target, all_findings, triage_report, plan, action_results)
-    return 0
-
-
-def _save_report(scan_id, target, all_findings, triage_report, plan, action_results):
+    # 7. Save full report
     report_path = Path("data") / f"report_{scan_id}.json"
     report_path.write_text(json.dumps({
         "target": target,
         "raw": all_findings,
         "triage": triage_report,
-        "reasoner": plan,
-        "actions": action_results,
+        "decisions": decisions,
     }, indent=2))
     print(f"\n[db] full report saved → {report_path}")
+    return 0
 
 
 if __name__ == "__main__":
