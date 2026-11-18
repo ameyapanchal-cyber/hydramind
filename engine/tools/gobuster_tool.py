@@ -24,14 +24,19 @@ def run_gobuster(target: str, wordlist: str = DEFAULT_WORDLIST, timeout: int = 1
 
 def parse_gobuster(result: ToolResult) -> list[dict]:
     findings = []
-    # Lines look like: /admin                (Status: 200) [Size: 1234]
-    pattern = re.compile(r"^(/\S*)\s+\(Status:\s*(\d+)\)\s+\[Size:\s*(\d+)\]")
+    # Current gobuster: "docs    (Status: 301) [Size: 312] [--> http://.../docs/]"
+    # Older versions include the leading slash — accept both.
+    pattern = re.compile(
+        r"^/?(?P<path>\S+)\s+\(Status:\s*(?P<status>\d+)\)\s+\[Size:\s*(?P<size>\d+)\]")
     for line in result.stdout.splitlines():
         m = pattern.match(line.strip())
         if m:
+            path = m.group("path")
+            if not path.startswith("/"):
+                path = "/" + path
             findings.append({
-                "path": m.group(1),
-                "status": int(m.group(2)),
-                "size": int(m.group(3)),
+                "path": path,
+                "status": int(m.group("status")),
+                "size": int(m.group("size")),
             })
     return findings
