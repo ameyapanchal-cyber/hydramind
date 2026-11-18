@@ -1,4 +1,4 @@
-"""SQLite store — logs every scan and finding for reproducible reports."""
+"""SQLite store — logs every scan, finding and approved action for reproducible reports."""
 from __future__ import annotations
 import sqlite3
 from datetime import datetime, timezone
@@ -24,6 +24,19 @@ def init_db():
             host TEXT, port INTEGER, protocol TEXT,
             service TEXT, product TEXT, version TEXT,
             FOREIGN KEY(scan_id) REFERENCES scans(id))""")
+        c.execute("""CREATE TABLE IF NOT EXISTS actions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, scan_id INTEGER NOT NULL,
+            action_id INTEGER, tool TEXT NOT NULL, risk TEXT NOT NULL,
+            description TEXT, approved INTEGER NOT NULL DEFAULT 0,
+            executed INTEGER NOT NULL DEFAULT 0, result TEXT,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(scan_id) REFERENCES scans(id))""")
+        # Migration: older DBs lack the columns for gobuster/nikto findings
+        cols = {r["name"] for r in c.execute("PRAGMA table_info(findings)")}
+        for col, typ in (("tool", "TEXT"), ("path", "TEXT"),
+                         ("status", "INTEGER"), ("size", "INTEGER"), ("detail", "TEXT")):
+            if col not in cols:
+                c.execute(f"ALTER TABLE findings ADD COLUMN {col} {typ}")
 
 
 def new_scan(target: str, tool: str) -> int:
@@ -34,11 +47,31 @@ def new_scan(target: str, tool: str) -> int:
         return cur.lastrowid
 
 
-def save_findings(scan_id: int, findings: list):
+def save_findings(scan_id: int, tool: str, findings: list):
+    """Save findings from any tool. nmap rows keep port/service fields,
+    gobuster rows use path/status/size, nikto rows use detail."""
     with _conn() as c:
         c.executemany(
             """INSERT INTO findings
-               (scan_id, host, port, protocol, service, product, version)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            [(scan_id, f.get("host"), f.get("port"), f.get("protocol"),
-              f.get("service"), f.get("product"), f.get("version")) for f in findings])
+               (scan_id, tool, host, port, protocol, service, product, version,
+                path, status, size, detail)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            [(scan_id, tool, f.get("host"), f.get("port"), f.get("protocol"),
+              f.get("service"), f.get("product"), f.get("version"),
+              f.get("path"), f.get("status"), f.get("size"),
+              f.get("detail") or f.get("finding")) for f in findings])
+
+
+def log_action(scan_id: int, action_id: int, tool: str, risk: str,
+               description: str, approved: bool, executed: bool, result: str = "") -> int:
+    """Audit trail for the approval gate — every proposed action is logged,
+    approved or not."""
+    with _conn() as c:
+        cur = c.execute(
+            """INSERT INTO actions
+               (scan_id, action_id, tool, risk, description, approved, executed, result, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (scan_id, action_id, tool, risk, description,
+             int(approved), int(executed), result,
+             datetime.now(timezone.utc).isoformat()))
+        return cur.lastrowid

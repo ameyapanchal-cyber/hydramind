@@ -28,4 +28,11 @@ def run_tool(command: list, timeout: int = 300) -> ToolResult:
         proc = subprocess.run(command, capture_output=True, text=True, timeout=timeout)
         return ToolResult(command, proc.returncode, proc.stdout, proc.stderr)
     except subprocess.TimeoutExpired as e:
-        return ToolResult(command, -1, e.stdout or "", e.stderr or "", timed_out=True)
+        # TimeoutExpired.stdout/.stderr are bytes even when text=True
+        out = e.stdout or ""
+        err = e.stderr or ""
+        if isinstance(out, bytes):
+            out = out.decode(errors="replace")
+        if isinstance(err, bytes):
+            err = err.decode(errors="replace")
+        return ToolResult(command, -1, out, err, timed_out=True)

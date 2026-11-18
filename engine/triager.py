@@ -8,7 +8,16 @@ import json
 import os
 from openai import OpenAI
 
-client = OpenAI()  # reads OPENAI_API_KEY from environment
+_client = None
+
+
+def _get_client() -> OpenAI:
+    """Lazy init so a missing OPENAI_API_KEY doesn't crash at import time —
+    the scope firewall must always run, key or no key."""
+    global _client
+    if _client is None:
+        _client = OpenAI()  # reads OPENAI_API_KEY from environment
+    return _client
 
 SYSTEM_PROMPT = """You are a penetration testing AI assistant.
 You will receive a JSON list of findings from recon tools (nmap, gobuster, nikto).
@@ -41,7 +50,7 @@ def triage(all_findings: dict) -> dict:
     Returns the parsed JSON from GPT.
     """
     user_msg = json.dumps(all_findings, indent=2)
-    response = client.chat.completions.create(
+    response = _get_client().chat.completions.create(
         model="gpt-4o-mini",
         messages=[
             {"role": "system", "content": SYSTEM_PROMPT},
