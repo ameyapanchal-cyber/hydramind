@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
-"""HydraMind — Phase 2. Usage: python3 main.py --target scanme.nmap.org
+"""HydraMind — Phase 4. Usage: python3 main.py --target 127.0.0.1
 
 Pipeline: scope check -> recon (nmap/gobuster/nikto, all logged) -> AI triage
--> per-finding AI Reasoner (GPT-4o) -> HUMAN APPROVAL GATE -> approved passive
-actions execute; exploitation-class tools are logged and queued for Phase 3
-(labs only) -> report."""
+-> per-finding AI Reasoner (GPT-4o) -> HUMAN APPROVAL GATE -> approved actions
+execute -> second-model validator -> Markdown/HTML report.
+
+Extra modes: --dry-run (proposals only, no gate/execution), --report <scan_id>,
+--validate-scan <scan_id>.
+"""
 from __future__ import annotations
 import argparse, json, os, sys
 from pathlib import Path
@@ -20,8 +23,9 @@ from engine.tools.wpscan_tool import run_wpscan, parse_wpscan
 from engine.tools.commix_tool import run_commix, parse_commix
 from engine.triager import triage
 from engine.reasoner import reason_about_finding, validate_action
+from engine.validator import validate_scan, provider_config
 from engine.findings import finding_from_tool, finding_from_triage
-from engine import db
+from engine import db, reporter
 
 SCOPE_FILE = Path(__file__).resolve().parent / "config" / "scope.yaml"
 GOBUSTER_WORDLIST_ROOT = Path("/usr/share/wordlists")
@@ -187,13 +191,54 @@ def _ai_fail_hint(e: Exception) -> str:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="HydraMind (Phase 2)")
-    ap.add_argument("--target", required=True)
+    ap = argparse.ArgumentParser(description="HydraMind (Phase 4)")
+    ap.add_argument("--target", help="host to test (required unless --report/--validate-scan)")
     ap.add_argument("--skip-nikto", action="store_true", help="skip nikto (slow)")
     ap.add_argument("--ports", help="nmap port spec (e.g. 1-10000, 6379,8080)")
     ap.add_argument("--seed-url", help="user-supplied endpoint to analyze (must be in scope)")
-    ap.add_argument("--cookie", help="session cookie injected into sqlmap/curl (never logged)")
+    ap.add_argument("--cookie", help="session cookie injected into sqlmap/curl/commix (never logged)")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="recon + triage + reasoner only — no approval, no execution")
+    ap.add_argument("--report", type=int, metavar="SCAN_ID",
+                    help="render Markdown + HTML for an existing scan and exit")
+    ap.add_argument("--validate-scan", type=int, metavar="SCAN_ID",
+                    help="run the second-model validator over an existing scan, then exit")
+    ap.add_argument("--json-report", help="path for the raw JSON report (default data/report_<id>.json)")
+    ap.add_argument("--no-validate", action="store_true", help="skip the second-model validator")
+    ap.add_argument("--no-report", action="store_true", help="skip Markdown/HTML report generation")
     args = ap.parse_args()
+
+    if args.report is not None:
+        db.init_db()
+        try:
+            paths = reporter.write_reports(args.report)
+        except ValueError as e:
+            print(f"[report] {e}")
+            return 1
+        print(f"[report] markdown → {paths['markdown']}")
+        print(f"[report] html     → {paths['html']}")
+        return 0
+
+    if args.validate_scan is not None:
+        db.init_db()
+        if not db.scan_row(args.validate_scan):
+            print(f"[validator] scan {args.validate_scan} not found")
+            return 1
+        cfg = provider_config()
+        if cfg["provider"] == "none":
+            print("[validator] no API key — set ANTHROPIC_API_KEY, "
+                  "GOOGLE_API_KEY/GEMINI_API_KEY or OPENAI_API_KEY")
+            return 1
+        print(f"[validator] {cfg['provider']}/{cfg['model']} over scan "
+              f"{args.validate_scan}...")
+        validate_scan(args.validate_scan)
+        paths = reporter.write_reports(args.validate_scan)
+        print(f"[report] markdown → {paths['markdown']}")
+        print(f"[report] html     → {paths['html']}")
+        return 0
+
+    if not args.target:
+        ap.error("--target is required (or use --report/--validate-scan)")
 
     # 1. Scope gate (stage 1: host authorization)
     fw = ScopeFirewall(SCOPE_FILE)
@@ -207,7 +252,7 @@ def main() -> int:
     db.log_scope_event(target, "recon", True, "")
     print(f"[scope] '{target}' authorized.\n")
 
-    scan_id = db.new_scan(target, tool="phase2")
+    scan_id = db.new_scan(target, tool="phase4")
     all_findings = {}
 
     # 2. nmap
@@ -300,7 +345,9 @@ def main() -> int:
 
     # 6. Per-finding Reasoner + HUMAN APPROVAL GATE
     print("="*60)
-    print(f"  REASONER ({REASONER_MODEL}) + APPROVAL GATE — one finding at a time")
+    mode = ("DRY RUN — proposals only, nothing executes" if args.dry_run
+            else "APPROVAL GATE — one finding at a time")
+    print(f"  REASONER ({REASONER_MODEL}) + {mode}")
     print("="*60)
     decisions = []
     for item, finding_id in zip(ranked, triage_ids):
@@ -329,6 +376,17 @@ def main() -> int:
         print(f"  confidence : {out.confidence:.0%}   risk: {out.risk_level}")
         if guard:
             print(guard)
+
+        if args.dry_run:
+            db.log_reasoner_decision(finding_id, out.attack_hypothesis,
+                                     out.exact_tool_and_command, out.confidence,
+                                     out.risk_level, "dry_run",
+                                     executed=False, result="dry-run: not executed")
+            decisions.append({**out.to_dict(), "rank": item["rank"],
+                              "human_decision": "dry_run", "status": "dry-run",
+                              "executed": False, "result": "dry-run: not executed"})
+            print("  [dry-run] proposal recorded — not executed")
+            continue
 
         approved = _ask(f"  Approve action for finding #{item['rank']}?",
                         default_yes=(out.risk_level == "passive"))
@@ -379,15 +437,38 @@ def main() -> int:
                           "human_decision": "approved", "status": status,
                           "executed": executed, "result": result_text})
 
-    # 7. Save full report
-    report_path = Path("data") / f"report_{scan_id}.json"
+    # 7. Second-model validation (skipped in dry-run / with --no-validate)
+    validation_results = []
+    if not args.dry_run and not args.no_validate:
+        cfg = provider_config()
+        if cfg["provider"] == "none":
+            print("\n[validator] skipped — no ANTHROPIC/GOOGLE/OPENAI key.")
+        else:
+            same = " (same family as reasoner)" if cfg["same_family"] else ""
+            print(f"\n[validator] second-model cross-check via "
+                  f"{cfg['provider']}/{cfg['model']}{same}...")
+            validation_results = validate_scan(scan_id)
+
+    # 8. Save full JSON report (path overridable for eval harnesses)
+    report_path = (Path(args.json_report) if args.json_report
+                   else Path("data") / f"report_{scan_id}.json")
+    report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text(json.dumps({
+        "scan_id": scan_id,
         "target": target,
+        "dry_run": args.dry_run,
         "raw": all_findings,
         "triage": triage_report,
         "decisions": decisions,
+        "validations": db.validations_for_scan(scan_id),
     }, indent=2))
     print(f"\n[db] full report saved → {report_path}")
+
+    # 9. Markdown + HTML report from the audit trail
+    if not args.no_report:
+        paths = reporter.write_reports(scan_id)
+        print(f"[report] markdown → {paths['markdown']}")
+        print(f"[report] html     → {paths['html']}")
     return 0
 
 

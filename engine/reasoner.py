@@ -118,6 +118,8 @@ Respond ONLY with valid JSON:
 
 Hard rules for exact_tool_and_command:
 - write the target literally as given in the input — never a placeholder
+- never invent URL paths: if the finding is a user-supplied endpoint, use its
+  exact URL from the finding/sibling evidence (scheme, host, port, path, query)
 - if the findings reference a non-standard web port, use that exact URL in the
   command (e.g. http://host:8081) — never silently assume port 80
 - never include credentials, cookies or tokens in the command — the executor

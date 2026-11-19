@@ -54,6 +54,15 @@ def init_db():
             executed INTEGER NOT NULL DEFAULT 0, result TEXT,
             created_at TEXT NOT NULL,
             FOREIGN KEY(finding_id) REFERENCES triage_findings(id))""")
+        c.execute("""CREATE TABLE IF NOT EXISTS validations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, scan_id INTEGER NOT NULL,
+            finding_id INTEGER, tool TEXT, title TEXT,
+            verdict TEXT, severity TEXT, confidence REAL,
+            rationale TEXT, remediation TEXT,
+            provider TEXT, model TEXT, same_family INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(scan_id) REFERENCES scans(id),
+            FOREIGN KEY(finding_id) REFERENCES triage_findings(id))""")
         # Migration: older DBs lack the columns for gobuster/nikto findings
         cols = {r["name"] for r in c.execute("PRAGMA table_info(findings)")}
         for col, typ in (("tool", "TEXT"), ("path", "TEXT"),
@@ -129,6 +138,88 @@ def log_action(scan_id: int, action_id: int, tool: str, risk: str,
             (scan_id, action_id, tool, risk, description,
              int(approved), int(executed), result, _now()))
         return cur.lastrowid
+
+
+def save_validation(scan_id: int, finding_id: int | None, tool: str, title: str,
+                    verdict: str, severity: str, confidence: float,
+                    rationale: str = "", remediation: str = "",
+                    provider: str = "", model: str = "",
+                    same_family: bool = False) -> int:
+    """Persist one second-model validation verdict for the report."""
+    with _conn() as c:
+        cur = c.execute(
+            """INSERT INTO validations
+               (scan_id, finding_id, tool, title, verdict, severity, confidence,
+                rationale, remediation, provider, model, same_family, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (scan_id, finding_id, tool, title, verdict, severity, confidence,
+             rationale, remediation, provider, model, int(same_family), _now()))
+        return cur.lastrowid
+
+
+def scan_row(scan_id: int) -> dict | None:
+    with _conn() as c:
+        row = c.execute("SELECT * FROM scans WHERE id = ?", (scan_id,)).fetchone()
+        return dict(row) if row else None
+
+
+def findings_for_scan(scan_id: int) -> list[dict]:
+    with _conn() as c:
+        rows = c.execute(
+            "SELECT * FROM findings WHERE scan_id = ? ORDER BY id", (scan_id,)).fetchall()
+        return [dict(r) for r in rows]
+
+
+def triage_for_scan(scan_id: int) -> list[dict]:
+    with _conn() as c:
+        rows = c.execute(
+            "SELECT * FROM triage_findings WHERE scan_id = ? ORDER BY rank, id",
+            (scan_id,)).fetchall()
+        return [dict(r) for r in rows]
+
+
+def decisions_for_scan(scan_id: int) -> list[dict]:
+    """Reasoner decisions joined with the triage finding they belong to."""
+    with _conn() as c:
+        rows = c.execute(
+            """SELECT rd.*, tf.rank, tf.severity AS triage_severity,
+                      tf.source, tf.description AS triage_description,
+                      tf.why, tf.next_step
+               FROM reasoner_decisions rd
+               JOIN triage_findings tf ON rd.finding_id = tf.id
+               WHERE tf.scan_id = ? ORDER BY tf.rank, rd.id""",
+            (scan_id,)).fetchall()
+        return [dict(r) for r in rows]
+
+
+def validations_for_scan(scan_id: int) -> list[dict]:
+    with _conn() as c:
+        rows = c.execute(
+            "SELECT * FROM validations WHERE scan_id = ? ORDER BY id",
+            (scan_id,)).fetchall()
+        return [dict(r) for r in rows]
+
+
+def clear_validations(scan_id: int) -> None:
+    """Make re-validation idempotent (one verdict set per scan)."""
+    with _conn() as c:
+        c.execute("DELETE FROM validations WHERE scan_id = ?", (scan_id,))
+
+
+def actions_for_scan(scan_id: int) -> list[dict]:
+    with _conn() as c:
+        rows = c.execute(
+            "SELECT * FROM actions WHERE scan_id = ? ORDER BY id", (scan_id,)).fetchall()
+        return [dict(r) for r in rows]
+
+
+def scope_events_for_target(target: str, limit: int = 20) -> list[dict]:
+    with _conn() as c:
+        rows = c.execute(
+            """SELECT * FROM scope_events WHERE target = ?
+               ORDER BY id DESC LIMIT ?""",
+            (target, limit)).fetchall()
+        return [dict(r) for r in rows]
 
 
 def log_scope_event(target: str, tool: str, allowed: bool, reason: str = "") -> int:

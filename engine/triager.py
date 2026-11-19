@@ -39,7 +39,9 @@ Respond ONLY with valid JSON in this exact format:
   "summary": "<2-3 sentence overall assessment>"
 }
 Only include findings worth investigating. Filter out pure noise.
-User-supplied endpoints are explicit priorities — always include them."""
+User-supplied endpoints are explicit priorities — always include them, and copy
+their exact URL (scheme, host, port, path and query string) into the finding
+text and next_step. Never shorten or invent a URL."""
 
 
 def triage(all_findings: dict) -> dict:

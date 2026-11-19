@@ -4,5 +4,9 @@ __pycache__/
 *.pyc
 data/*.db
 data/report_*.json
+reports/
+eval/results/
+eval/artifacts/
+eval/labs.yaml
 .env
 nikto_*.txt

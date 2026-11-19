@@ -1,0 +1,43 @@
+# PortSwigger Web Security Academy eval manifest (EXAMPLE).
+#
+# Copy to eval/labs.yaml (gitignored), launch the labs, and fill in each host
+# and seed URL. Every target host must also be present in config/scope.yaml
+# with environment: lab — the harness refuses to run unscoped labs.
+#
+# Scoring (dry-run, nothing is executed):
+#   expected tool proposed + expected keyword  -> 1.0
+#   expected tool proposed                     -> 0.5
+#   otherwise                                  -> 0.0
+
+labs:
+  - name: SQL injection in WHERE clause allowing retrieval of hidden data
+    category: sqli
+    target: <lab-host>
+    seed_url: https://<lab-host>/filter?category=Gifts
+    expect:
+      tools: [sqlmap]
+      keywords: [injection, category, id]
+
+  - name: OS command injection, simple case
+    category: command-injection
+    target: <lab-host>
+    seed_url: https://<lab-host>/feedback/submit
+    expect:
+      tools: [commix, curl]
+      keywords: [injection, command, feedback]
+
+  - name: File path traversal, simple case
+    category: path-traversal
+    target: <lab-host>
+    seed_url: https://<lab-host>/image?filename=1.jpg
+    expect:
+      tools: [curl]
+      keywords: [traversal, filename, passwd]
+
+  - name: Unprotected admin functionality with unpredictable URL
+    category: access-control
+    target: <lab-host>
+    seed_url: https://<lab-host>/robots.txt
+    expect:
+      tools: [curl, gobuster]
+      keywords: [admin, robots, path]

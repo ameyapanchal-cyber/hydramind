@@ -9,12 +9,16 @@ Many models (the heads), one reasoning core (the mind).
 ## Requirements
 - Kali Linux, Python 3.11+, nmap, gobuster, nikto, curl, sqlmap, redis-cli,
   hydra, wpscan, commix
+- Python packages: `PyYAML`, `openai`, `requests` (see `requirements.txt`)
 
 ## Setup
 ```bash
 python3 -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
 export OPENAI_API_KEY=sk-...   # required for the AI heads
+# optional — better validator: a different model family wins over the
+# same-family OpenAI fallback
+export ANTHROPIC_API_KEY=...   # or GOOGLE_API_KEY / GEMINI_API_KEY
 ```
 
 ## Run
@@ -24,6 +28,9 @@ python3 main.py --target 127.0.0.1 --ports 1-10000 --skip-nikto
 python3 main.py --target 127.0.0.1 --skip-nikto \
   --seed-url 'http://127.0.0.1:8081/vulnerabilities/sqli/?id=1&Submit=Submit' \
   --cookie 'PHPSESSID=...; security=low'
+python3 main.py --target 127.0.0.1 --dry-run --skip-nikto --ports 8081   # proposals only
+python3 main.py --validate-scan 6    # re-run the validator on an existing scan
+python3 main.py --report 6           # Markdown + HTML from the audit trail
 ```
 Out-of-scope targets are refused by the Scope Firewall before any subprocess runs.
 
@@ -35,7 +42,8 @@ written to reports, and never committed.
 Pipeline: scope check → recon (nmap → gobuster → nikto, all saved to SQLite) →
 GPT-4o-mini triage → **per-finding GPT-4o Reasoner** → **human approval gate** →
 approved actions execute via `engine/runner.py` (recon, fetch, sqlmap,
-redis-cli) → `data/report_N.json`.
+redis-cli, hydra, wpscan, commix) → **second-model validator** →
+`data/report_N.json` + `reports/report_N.md` + `reports/report_N.html`.
 
 ### Scope firewall — two-stage authorization
 `config/scope.yaml` supports two forms side by side:
@@ -206,6 +214,96 @@ sqlmap found `id` (GET) injectable: boolean-based blind, error-based,
 time-based blind and UNION (MySQL). The session cookie was injected by the
 executor, not by the model. Full report: `data/report_6.json`.
 
+## Phase 4 — validator, reports, PortSwigger eval
+
+### Second-model validator (`engine/validator.py`)
+After execution, an independent model re-checks every triage finding against
+the logged evidence (approved command, exit code, raw output, parsed tool
+findings) and returns `confirmed | likely | false_positive | needs_review`
+plus an adjusted severity, confidence, rationale and remediation.
+
+Provider selection (first available wins, override with
+`HYDRAMIND_VALIDATOR_PROVIDER` / `HYDRAMIND_VALIDATOR_MODEL`):
+
+| Provider | Key | Default model |
+|---|---|---|
+| anthropic | `ANTHROPIC_API_KEY` | `claude-sonnet-4-5` |
+| google | `GOOGLE_API_KEY` / `GEMINI_API_KEY` | `gemini-flash-latest` |
+| openai (fallback) | `OPENAI_API_KEY` | `gpt-4o` |
+
+The OpenAI fallback is the same model family as the Reasoner and is flagged
+(`same_family=1`) in the DB and in reports — a true second family is better.
+Google automatically falls back across `gemini-flash-latest` →
+`gemini-3-flash-preview` → `gemini-3.1-flash-lite` when a model is unavailable
+(404/429/503); API keys are redacted from stored validator errors. Unparseable
+validator output becomes `needs_review`, never a silent confirmation.
+`--no-validate` skips it; `--validate-scan <id>` re-validates an existing scan.
+
+Real validator output on the authenticated-SQLi scan, true second family
+(Gemini; `gemini-flash-latest` was 503 so the fallback model was used):
+
+```text
+[validator] google/gemini-flash-latest over scan 6...
+  #1 [confirmed] CRITICAL (100%) Potential SQL Injection vulnerability
+  #2 [confirmed] CRITICAL (100%) Redis service exposed on port 6379
+  #3 [confirmed] CRITICAL (100%) Apache httpd version 2.4.49 running on port 8080
+  #4 [needs_review] INFO (100%) Apache httpd version 2.4.25 running on port 8081
+  #5 [false_positive] INFO (100%) Access to sensitive files (.htaccess, .htpasswd) is restricted (403)
+  #6 [false_positive] INFO (100%) Redirects to /config, /docs, and /external on port 8081
+```
+
+Same scan via the OpenAI fallback (same family as the Reasoner):
+
+```text
+[validator] openai/gpt-4o over scan 6...
+  #1 [confirmed] HIGH (100%) Potential SQL Injection vulnerability
+  #2 [confirmed] HIGH (90%) Redis service exposed on port 6379
+  #3 [confirmed] CRITICAL (100%) Apache httpd version 2.4.49 running on port 8080
+  #4 [needs_review] INFO (0%) Apache httpd version 2.4.25 running on port 8081
+  #5 [false_positive] INFO (100%) Access to sensitive files (.htaccess, .htpasswd) is restricted (403)
+  #6 [false_positive] INFO (90%) Redirects to /config, /docs, and /external on port 8081
+```
+
+### Report writer (`engine/reporter.py`)
+`python3 main.py --report <scan_id>` renders `reports/report_<id>.md` and a
+self-contained dark-theme `reports/report_<id>.html` **purely from SQLite**:
+executive summary, severity/verdict breakdown, per-finding evidence + human
+decision, validator verdict/remediation, decision log, raw tool findings and
+scope events. Reports are generated automatically after each scan
+(`--no-report` to skip); `reports/` is gitignored.
+
+### PortSwigger eval harness (`eval/run_eval.py`)
+Scores recon → triage → reasoning quality against Web Security Academy labs in
+`--dry-run` mode (nothing executes; exploitation still needs the human gate):
+
+1. `cp eval/labs.example.yaml eval/labs.yaml` (gitignored) and fill in lab
+   host + seed URL from https://portswigger.net/web-security/all-labs
+2. add each lab host to `config/scope.yaml` with `environment: lab` and
+   `allowed_tools`
+3. export your provider keys (the harness passes the environment through to
+   `main.py`), then `python eval/run_eval.py` (optionally `--only sqli`,
+   `--limit 3`)
+
+Each lab scores 1.0 (expected tool + keyword), 0.5 (expected tool only) or 0.0.
+Artifacts: `eval/artifacts/<lab>.json|.log`, summary in
+`eval/results/eval_<timestamp>.json`. Labs missing from scope are reported as
+`scope_missing` and never scanned.
+
+Real run against a live Academy lab ("SQL injection UNION attack, finding a
+column containing text", `--ports 443`):
+
+```text
+[eval] SQL injection UNION attack finding a column containing text (sqli)
+       score 1.0 · tools ['sqlmap'] · keywords ['injection', 'category'] · proposals 1
+
+--- Finding #1 [MEDIUM] Potentially vulnerable endpoint found: https://<lab-id>.web-security-academy.net/filter?category=Gifts
+  command    : sqlmap -u 'https://<lab-id>.web-security-academy.net/filter?category=Gifts' --batch
+  [dry-run] proposal recorded — not executed
+```
+
+Tests: `python tests/test_phase4.py` (validator parsing/provider selection,
+report rendering + HTML escaping, DB round-trips, eval scoring).
+
 ## Lab targets (local, scope-listed, `environment: lab`)
 
 | Target | Service | Status |
@@ -231,6 +329,9 @@ Metasploit setup, so tests can run beyond localhost.
   commix's time-based phase). hydra/wpscan are parser- and validation-tested,
   awaiting SSH/WordPress lab targets for a live run.
 - Phase 3 (remaining): Juice Shop retest when the container is back
-- Phase 4: validator (second model family) + report writer + PortSwigger eval
+- Phase 4 (done): second-model validator (Anthropic/Google/OpenAI fallback,
+  same-family flagged), Markdown + HTML report writer from SQLite,
+  `--dry-run`, `--validate-scan`, and the PortSwigger eval harness
+  (dry-run scoring; live lab runs need Academy lab URLs + scope entries)
 - Phase 5: n8n trigger/notify + dashboard
 - Phase 6: LangGraph agent + RAG (CVE/ExploitDB) + model router
