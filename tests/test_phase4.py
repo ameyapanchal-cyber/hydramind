@@ -16,7 +16,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from engine import db, reporter, validator  # noqa: E402
+from engine import db, models, reporter, validator  # noqa: E402
 
 PASS = 0
 
@@ -121,6 +121,10 @@ def _seed_temp_db(path: Path) -> int:
                        "confirmed", "HIGH", 0.95, "sqlmap evidence", "parameterize",
                        "openai", "gpt-4o", True)
     db.log_scope_event("127.0.0.1", "recon", True, "")
+    db.save_summary(scan_id, "Validated SQL injection [F1] on the target.",
+                    "ollama", "llama3.1:8b")
+    db.log_model_call(scan_id, "reasoner", "hybrid", "openai", "gpt-4o",
+                      "abc123", 1200, 900, 120, '{"risk_level":"exploit"}', "")
     db.DB_PATH = old
     return scan_id
 
@@ -142,6 +146,9 @@ def test_reporter() -> None:
             check("report: markdown title", "# HydraMind" in md)
             check("report: markdown evidence", "sqlmap" in md and "confirmed" in md)
             check("report: markdown scope events", "scope firewall" in md.lower())
+            check("report: writer summary loaded",
+                  data["llm_summary"]["summary"].startswith("Validated"))
+            check("report: writer summary rendered", "Writer summary" in md)
 
             html = reporter.render_html(data)
             check("report: html doctype", html.startswith("<!doctype html>"))
@@ -190,12 +197,90 @@ def test_eval_scoring() -> None:
     check("eval: miss score", miss["score"] == 0.0)
 
 
+def test_model_registry() -> None:
+    keys = ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GOOGLE_API_KEY",
+            "GEMINI_API_KEY", "OPENROUTER_API_KEY", "HYDRAMIND_PROFILE",
+            "HYDRAMIND_REASONER_PROVIDER", "HYDRAMIND_REASONER_MODEL",
+            "HYDRAMIND_VALIDATOR_PROVIDER", "HYDRAMIND_VALIDATOR_MODEL",
+            "HYDRAMIND_TRIAGER_PROVIDER", "HYDRAMIND_TRIAGER_MODEL")
+    saved = {k: os.environ.pop(k, None) for k in keys}
+    old_profile = models._active_profile
+    try:
+        check("models: llama family", models.model_family("ollama", "llama3.1:8b") == "llama")
+        check("models: mistral family",
+              models.model_family("ollama", "mistral:7b") == "mistral")
+        check("models: qwen family",
+              models.model_family("openrouter", "qwen/qwen3-8b:free") == "qwen")
+        check("models: cloud families",
+              models.model_family("google", "gemini-flash-latest") == "google"
+              and models.model_family("openai", "gpt-4o") == "openai")
+
+        models.configure("free")
+        tri = models.resolve_role("triager")
+        check("models: free profile triager",
+              tri["provider"] == "ollama" and tri["model"] == "llama3.1:8b")
+        check("models: free profile reasoner",
+              models.resolve_role("reasoner")["provider"] == "google")
+
+        os.environ["HYDRAMIND_REASONER_PROVIDER"] = "anthropic"
+        os.environ["HYDRAMIND_REASONER_MODEL"] = "claude-test"
+        rea = models.resolve_role("reasoner")
+        check("models: env overrides profile",
+              rea["provider"] == "anthropic" and rea["model"] == "claude-test"
+              and rea["family"] == "anthropic")
+
+        os.environ["OPENAI_API_KEY"] = "x"
+        os.environ["HYDRAMIND_VALIDATOR_PROVIDER"] = "openai"
+        os.environ.pop("HYDRAMIND_REASONER_PROVIDER")
+        os.environ.pop("HYDRAMIND_REASONER_MODEL")
+        models.configure("hybrid")
+        same = models.resolve_validator()
+        check("models: same-family detected",
+              same["provider"] == "openai" and same["same_family"] is True)
+
+        os.environ["GOOGLE_API_KEY"] = "x"
+        os.environ["HYDRAMIND_VALIDATOR_PROVIDER"] = "google"
+        diff = models.resolve_validator()
+        check("models: cross-family validator",
+              diff["provider"] == "google" and diff["same_family"] is False)
+    finally:
+        models._active_profile = old_profile
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
+def test_writer_and_calls() -> None:
+    from engine import writer
+    check("writer: valid citations", writer._validate_citations("issues [F1] and [F2]", 2))
+    check("writer: invalid citation rejected",
+          not writer._validate_citations("issues [F3]", 2))
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        old = db.DB_PATH
+        scan_id = _seed_temp_db(tmp_path / "test.db")
+        try:
+            db.DB_PATH = tmp_path / "test.db"
+            calls = db.model_calls_for_scan(scan_id)
+            check("db: model call logged",
+                  len(calls) == 1 and calls[0]["role"] == "reasoner"
+                  and calls[0]["provider"] == "openai")
+            check("db: summary round-trip",
+                  db.summary_for_scan(scan_id)["summary"].startswith("Validated"))
+        finally:
+            db.DB_PATH = old
+
+
 def main() -> int:
     test_validator_parsing()
     test_provider_selection()
     test_reporter()
     test_clear_validations()
     test_eval_scoring()
+    test_model_registry()
+    test_writer_and_calls()
     print(f"\n{PASS} checks passed")
     return 0
 

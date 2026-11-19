@@ -61,6 +61,7 @@ def build_report_data(scan_id: int) -> dict:
         "severity_counts": severity_counts,
         "verdict_counts": verdict_counts,
         "executed_count": sum(1 for d in decisions if d.get("executed")),
+        "llm_summary": db.summary_for_scan(scan_id),
         "generated_at": _now(),
     }
 
@@ -72,7 +73,7 @@ def _truncate(value, limit: int) -> str:
 
 def _validator_line(v: dict | None) -> str:
     if not v:
-        return "Not validated (validator disabled or no API key)."
+        return "Not validated (validator disabled or no model available)."
     same = " (same-family fallback)" if v.get("same_family") else ""
     return (f"`{v.get('verdict')}` — severity `{v.get('severity')}`, "
             f"confidence {float(v.get('confidence') or 0):.0%}{same} — "
@@ -108,6 +109,13 @@ def render_markdown(data: dict) -> str:
     else:
         add("- Validated: **0** (validator disabled or no API key)")
     add("")
+    if data.get("llm_summary"):
+        ws = data["llm_summary"]
+        add(f"**Writer summary** (LLM-assisted, grounded in [F#] IDs; "
+            f"`{ws.get('provider')}/{ws.get('model')}`):")
+        add("")
+        add(ws.get("summary") or "")
+        add("")
 
     confirmed = [v for v in data["validations"]
                  if v.get("verdict") in ("confirmed", "likely")]
@@ -291,6 +299,11 @@ def render_html(data: dict) -> str:
     else:
         add("<tr><th>Validated</th><td>0 (validator disabled or no API key)</td></tr>")
     add("</tbody></table>")
+    if data.get("llm_summary"):
+        ws = data["llm_summary"]
+        add(f"<p class='sub'>Writer summary — LLM-assisted, grounded in [F#] IDs "
+            f"(<code>{_e(ws.get('provider'))}/{_e(ws.get('model'))}</code>)</p>")
+        add(f"<p>{_e(ws.get('summary'))}</p>")
 
     confirmed = [v for v in data["validations"]
                  if v.get("verdict") in ("confirmed", "likely")]
@@ -343,7 +356,7 @@ def render_html(data: dict) -> str:
             if v.get("remediation"):
                 add(f"<p><b>Remediation:</b> {_e(v['remediation'])}</p>")
         else:
-            add("<p class='muted'>Not validated (validator disabled or no API key).</p>")
+            add("<p class='muted'>Not validated (validator disabled or no model available).</p>")
         if d.get("human_decision"):
             add(f"<p><b>Human decision:</b> {_e(d['human_decision'])} "
                 f"(risk {_e(d.get('risk_level'))}, executed "

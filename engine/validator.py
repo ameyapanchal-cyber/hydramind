@@ -1,16 +1,15 @@
 """Validator — independent second-model cross-check before the report.
 
-The Reasoner (OpenAI) proposes actions; this module asks a *different model
-family* to judge whether each finding is actually supported by the evidence
-that the executor recorded. Providers are auto-selected:
+The Reasoner proposes actions; this module asks a *different model family*
+(validator role in config/models.yaml) to judge whether each finding is
+actually supported by the evidence that the executor recorded.
 
-    ANTHROPIC_API_KEY  -> anthropic (claude)
-    GOOGLE_API_KEY / GEMINI_API_KEY -> google (gemini)
-    OPENAI_API_KEY     -> openai fallback (same family as the Reasoner,
-                          flagged honestly in the DB/report)
+Independence is computed against the active reasoner role, not hardcoded:
+same-family verdicts are flagged in the DB/report, and
+HYDRAMIND_REQUIRE_SECOND_FAMILY=1 refuses to validate when families match.
 
-Override with HYDRAMIND_VALIDATOR_PROVIDER / HYDRAMIND_VALIDATOR_MODEL.
-No key at all -> validation is skipped (reports still work).
+Override with HYDRAMIND_VALIDATOR_PROVIDER / HYDRAMIND_VALIDATOR_MODEL or a
+profile. No available model -> validation is skipped (reports still work).
 """
 from __future__ import annotations
 
@@ -19,16 +18,27 @@ import os
 import re
 from dataclasses import dataclass, asdict
 
-from engine import db
-
-DEFAULT_MODELS = {
-    "anthropic": "claude-sonnet-4-5",
-    "google": "gemini-flash-latest",
-    "openai": "gpt-4o",
-}
-GOOGLE_FALLBACK_MODELS = ("gemini-3-flash-preview", "gemini-3.1-flash-lite")
+from engine import db, models
+from engine.models import DEFAULT_MODELS, GOOGLE_FALLBACK_MODELS  # re-exported
+from engine.models import redact as _redact
 VERDICTS = ("confirmed", "likely", "false_positive", "needs_review")
 SEVERITIES = ("CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO")
+
+
+@dataclass
+class ValidationResult:
+    verdict: str
+    severity: str
+    confidence: float
+    rationale: str
+    remediation: str
+    provider: str
+    model: str
+    same_family: bool
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
 
 SYSTEM_PROMPT = """You are the Validator — an independent second-model reviewer
 in an AUTHORIZED penetration-testing pipeline. Another model proposed actions,
@@ -76,133 +86,18 @@ Respond ONLY with valid JSON:
  "remediation": "<=200 chars, one actionable fix"}
 """
 
-_client = None
-
-
-@dataclass
-class ValidationResult:
-    verdict: str
-    severity: str
-    confidence: float
-    rationale: str
-    remediation: str
-    provider: str
-    model: str
-    same_family: bool
-
-    def to_dict(self) -> dict:
-        return asdict(self)
-
-
 def provider_config() -> dict:
-    """Resolve the validator provider/model. 'none' when no API key exists."""
-    provider = os.environ.get("HYDRAMIND_VALIDATOR_PROVIDER", "").strip().lower()
-    if provider not in ("anthropic", "google", "openai", "none"):
-        provider = ""
-    if not provider:
-        if os.environ.get("ANTHROPIC_API_KEY"):
-            provider = "anthropic"
-        elif os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY"):
-            provider = "google"
-        elif os.environ.get("OPENAI_API_KEY"):
-            provider = "openai"
-        else:
-            provider = "none"
-    model = os.environ.get("HYDRAMIND_VALIDATOR_MODEL", "").strip()
-    if not model:
-        model = DEFAULT_MODELS.get(provider, "")
+    """Resolve the validator role + independence against the reasoner."""
+    cfg = models.resolve_validator()
     return {
-        "provider": provider,
-        "model": model,
-        "same_family": provider == "openai",
+        "provider": cfg["provider"],
+        "model": cfg["model"],
+        "same_family": cfg["same_family"],
+        "family": cfg["family"],
+        "reasoner_family": cfg.get("reasoner_family", ""),
+        "profile": cfg["profile"],
+        "fallback_from": cfg.get("fallback_from", ""),
     }
-
-
-def _openai_client():
-    global _client
-    if _client is None:
-        from openai import OpenAI
-        _client = OpenAI(timeout=60.0)
-    return _client
-
-
-def _redact(text: str) -> str:
-    """Strip API keys/query secrets from error text before it is stored."""
-    text = re.sub(r"(key=)[^&\s\"']+", r"\1REDACTED", str(text or ""))
-    text = re.sub(r"(api[_-]?key[\"']?\s*[:=]\s*)[^\s\"',}]+", r"\1REDACTED",
-                  text, flags=re.I)
-    return text
-
-
-def _call_model(provider: str, model: str, system: str, user: str) -> tuple[str, str]:
-    """One chat completion via the provider's REST API (OpenAI uses the SDK).
-    Returns (text, model_actually_used)."""
-    if provider == "openai":
-        response = _openai_client().chat.completions.create(
-            model=model,
-            messages=[{"role": "system", "content": system},
-                      {"role": "user", "content": user}],
-            temperature=0.1,
-            response_format={"type": "json_object"},
-        )
-        return response.choices[0].message.content or "", model
-
-    import requests
-
-    if provider == "anthropic":
-        response = requests.post(
-            "https://api.anthropic.com/v1/messages",
-            headers={
-                "x-api-key": os.environ["ANTHROPIC_API_KEY"],
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json",
-            },
-            json={
-                "model": model,
-                "max_tokens": 700,
-                "temperature": 0.1,
-                "system": system,
-                "messages": [{"role": "user", "content": user}],
-            },
-            timeout=60,
-        )
-        response.raise_for_status()
-        blocks = response.json().get("content") or []
-        return ("".join(b.get("text", "") for b in blocks
-                        if b.get("type") == "text"), model)
-
-    if provider == "google":
-        key = os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY")
-        candidates = [model] + [m for m in GOOGLE_FALLBACK_MODELS if m != model]
-        last_error = None
-        for name in candidates:
-            try:
-                response = requests.post(
-                    "https://generativelanguage.googleapis.com/v1beta/models/"
-                    f"{name}:generateContent",
-                    params={"key": key},
-                    json={
-                        "systemInstruction": {"parts": [{"text": system}]},
-                        "contents": [{"role": "user", "parts": [{"text": user}]}],
-                        "generationConfig": {
-                            "temperature": 0.1,
-                            "responseMimeType": "application/json",
-                        },
-                    },
-                    timeout=45,
-                )
-                response.raise_for_status()
-                cands = response.json().get("candidates") or []
-                parts = (cands[0].get("content", {}).get("parts") or []) if cands else []
-                text = "".join(p.get("text", "") for p in parts)
-                if text.strip():
-                    return text, name
-                last_error = RuntimeError(f"{name}: empty response")
-            except Exception as e:  # try the next Gemini model on 404/429/503
-                last_error = e
-        raise RuntimeError(_redact(last_error))
-
-    raise RuntimeError(f"unsupported validator provider: {provider}")
 
 
 def _clean(value, limit: int = 600) -> str:
@@ -262,11 +157,12 @@ def validate_finding(target: str, tool: str, title: str, description: str,
                      triage_why: str = "", triage_next: str = "",
                      executed: bool = False, command: str = "",
                      result: str = "", tool_findings: str = "",
-                     fallback_severity: str = "INFO") -> ValidationResult:
+                     fallback_severity: str = "INFO",
+                     scan_id: int | None = None) -> ValidationResult:
     """Ask the validator model about one finding. Raises on transport errors."""
-    cfg = provider_config()
+    cfg = models.resolve_validator()
     if cfg["provider"] == "none":
-        raise RuntimeError("no validator API key configured")
+        raise RuntimeError("no validator model available")
 
     code_match = re.search(r"\brc=(-?\d+)", result or "")
     exit_code = int(code_match.group(1)) if code_match else (0 if executed else None)
@@ -288,18 +184,31 @@ def validate_finding(target: str, tool: str, title: str, description: str,
             "tool_evidence": _clean(tool_findings, 2500),
         },
     }
-    raw, model_used = _call_model(cfg["provider"], cfg["model"], SYSTEM_PROMPT,
-                                  json.dumps(payload, indent=2, default=str))
-    return parse_validation_response(raw, cfg["provider"], model_used,
+    reply = models.chat(
+        "validator", SYSTEM_PROMPT,
+        json.dumps(payload, indent=2, default=str),
+        temperature=0.1, json_mode=True, scan_id=scan_id, role_cfg=cfg,
+    )
+    return parse_validation_response(reply.text, reply.provider, reply.model,
                                      cfg["same_family"], fallback_severity)
 
 
 def validate_scan(scan_id: int, top_n: int | None = None) -> list[dict]:
     """Validate a scan's triage findings against logged evidence and persist
     the verdicts. Returns one summary dict per finding (rank order)."""
-    cfg = provider_config()
+    cfg = models.resolve_validator()
     if cfg["provider"] == "none":
         return []
+    if cfg["same_family"]:
+        if os.environ.get("HYDRAMIND_REQUIRE_SECOND_FAMILY", "").lower() in (
+                "1", "true", "yes"):
+            print(f"[validator] REFUSED — {cfg['provider']}/{cfg['model']} is the "
+                  f"same family as the reasoner ({cfg['reasoner_family']}); "
+                  f"set a different validator provider/model.")
+            return []
+        print(f"[validator] WARNING: {cfg['provider']}/{cfg['model']} is the same "
+              f"family as the reasoner ({cfg['reasoner_family']}) — independence "
+              f"is flagged in the report.")
 
     scan = db.scan_row(scan_id)
     if not scan:
@@ -338,6 +247,7 @@ def validate_scan(scan_id: int, top_n: int | None = None) -> list[dict]:
                 result=d.get("result") or "",
                 tool_findings=evidence,
                 fallback_severity=tf.get("severity") or "INFO",
+                scan_id=scan_id,
             )
             error = ""
         except Exception as e:  # transport/API failure must not kill the scan

@@ -1,23 +1,13 @@
 """
 AI Triager — the first Hydra head.
-Takes all raw findings (nmap + gobuster + nikto) and asks GPT-4o-mini
-to rank them by risk so you don't read raw tool output yourself.
+Takes all raw findings (nmap + gobuster + nikto) and asks the triager role
+(config/models.yaml: Ollama / GPT-4o-mini / any provider) to rank them by risk
+so you don't read raw tool output yourself.
 """
 from __future__ import annotations
 import json
-import os
-from openai import OpenAI
 
-_client = None
-
-
-def _get_client() -> OpenAI:
-    """Lazy init so a missing OPENAI_API_KEY doesn't crash at import time —
-    the scope firewall must always run, key or no key."""
-    global _client
-    if _client is None:
-        _client = OpenAI()  # reads OPENAI_API_KEY from environment
-    return _client
+from engine import models
 
 SYSTEM_PROMPT = """You are a penetration testing AI assistant.
 You will receive a JSON list of findings from recon tools (nmap, gobuster,
@@ -44,25 +34,19 @@ their exact URL (scheme, host, port, path and query string) into the finding
 text and next_step. Never shorten or invent a URL."""
 
 
-def triage(all_findings: dict) -> dict:
+def triage(all_findings: dict, scan_id: int | None = None) -> dict:
     """
     all_findings: {
         "nmap": [...],
         "gobuster": [...],
         "nikto": [...]
     }
-    Returns the parsed JSON from GPT.
+    Returns the parsed JSON from the triager role.
     """
     user_msg = json.dumps(all_findings, indent=2)
-    response = _get_client().chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user_msg},
-        ],
-        temperature=0.2,
-    )
-    raw = response.choices[0].message.content.strip()
+    reply = models.chat("triager", SYSTEM_PROMPT, user_msg,
+                        temperature=0.2, json_mode=True, scan_id=scan_id)
+    raw = reply.text.strip()
     # Strip markdown code fences if GPT wraps in ```json
     if raw.startswith("```"):
         raw = raw.split("```")[1]

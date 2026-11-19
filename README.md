@@ -15,10 +15,13 @@ Many models (the heads), one reasoning core (the mind).
 ```bash
 python3 -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
-export OPENAI_API_KEY=sk-...   # required for the AI heads
-# optional — better validator: a different model family wins over the
-# same-family OpenAI fallback
-export ANTHROPIC_API_KEY=...   # or GOOGLE_API_KEY / GEMINI_API_KEY
+export OPENAI_API_KEY=sk-...      # hybrid profile: triager + reasoner
+export GOOGLE_API_KEY=...         # hybrid profile: validator (Gemini)
+# optional providers (switch per role in config/models.yaml)
+export ANTHROPIC_API_KEY=...
+export OPENROUTER_API_KEY=...
+# optional local models: install Ollama, then `ollama pull llama3.1:8b mistral:7b`
+# export OLLAMA_BASE_URL=http://127.0.0.1:11434/v1   # default; point at the host if needed
 ```
 
 ## Run
@@ -31,6 +34,8 @@ python3 main.py --target 127.0.0.1 --skip-nikto \
 python3 main.py --target 127.0.0.1 --dry-run --skip-nikto --ports 8081   # proposals only
 python3 main.py --validate-scan 6    # re-run the validator on an existing scan
 python3 main.py --report 6           # Markdown + HTML from the audit trail
+python3 main.py --target 127.0.0.1 --skip-nikto --profile free    # zero-cost stack
+python3 main.py --target 127.0.0.1 --skip-nikto --profile quality # Claude reasoner
 ```
 Out-of-scope targets are refused by the Scope Firewall before any subprocess runs.
 
@@ -40,10 +45,46 @@ injected into sqlmap/curl execution only — it is never shown to the AI, never
 written to reports, and never committed.
 
 Pipeline: scope check → recon (nmap → gobuster → nikto, all saved to SQLite) →
-GPT-4o-mini triage → **per-finding GPT-4o Reasoner** → **human approval gate** →
+**triager role** → **per-finding reasoner role** → **human approval gate** →
 approved actions execute via `engine/runner.py` (recon, fetch, sqlmap,
-redis-cli, hydra, wpscan, commix) → **second-model validator** →
-`data/report_N.json` + `reports/report_N.md` + `reports/report_N.html`.
+redis-cli, hydra, wpscan, commix) → **cross-family validator role** →
+optional **writer role** → `data/report_N.json` + `reports/report_N.md` +
+`reports/report_N.html`.
+
+### Model roles & profiles (`engine/models.py`, `config/models.yaml`)
+Four roles, each with its own provider/model — switch without code changes:
+
+| Role | Job | Calls/scan | Typical choice |
+|---|---|---|---|
+| triager | rank raw findings | 1 (batched) | local Ollama or GPT-4o-mini |
+| reasoner | propose one action per finding | 1 per finding | GPT-4o / Claude / Gemini |
+| validator | cross-family evidence check | 1 per finding | different family from reasoner |
+| writer | grounded executive summary | 1 (optional) | any cheap model; `none` = deterministic |
+
+Built-in profiles: `hybrid` (OpenAI triage+reasoning, Gemini validator),
+`free` (Ollama triage, Gemini reasoning, Ollama Mistral validator),
+`quality` (Ollama triage, Claude reasoner, Gemini validator),
+`local` (three different local families, fully offline).
+
+```bash
+python3 main.py --profile free ...            # or HYDRAMIND_PROFILE=free
+HYDRAMIND_REASONER_PROVIDER=anthropic \
+HYDRAMIND_REASONER_MODEL=claude-sonnet-4-5 python3 main.py ...
+```
+
+- Providers: `openai`, `anthropic`, `google`, `openrouter`, `ollama`, `none`.
+  Ollama/OpenRouter use the OpenAI-compatible adapter; set `OLLAMA_BASE_URL` if
+  Ollama runs on your Windows host instead of the Kali VM.
+- **Independence is computed**, not hardcoded: the validator's family is
+  compared with the reasoner's (`llama`, `qwen`, `mistral`, `openai`,
+  `anthropic`, `google`, ...). Same-family runs are flagged in the DB/report;
+  `HYDRAMIND_REQUIRE_SECOND_FAMILY=1` refuses to validate instead.
+- **Every model call is logged** in `model_calls` (role, profile, provider,
+  model actually used, prompt hash, latency, tokens, response/error) — the
+  reproducibility trail for the thesis.
+- **Writer is opt-in**: `writer: none` keeps the deterministic report. When
+  enabled, the writer only sees validated findings and must cite `[F#]` IDs;
+  a failed citation check discards the summary and keeps the deterministic one.
 
 ### Scope firewall — two-stage authorization
 `config/scope.yaml` supports two forms side by side:
@@ -222,17 +263,11 @@ the logged evidence (approved command, exit code, raw output, parsed tool
 findings) and returns `confirmed | likely | false_positive | needs_review`
 plus an adjusted severity, confidence, rationale and remediation.
 
-Provider selection (first available wins, override with
-`HYDRAMIND_VALIDATOR_PROVIDER` / `HYDRAMIND_VALIDATOR_MODEL`):
-
-| Provider | Key | Default model |
-|---|---|---|
-| anthropic | `ANTHROPIC_API_KEY` | `claude-sonnet-4-5` |
-| google | `GOOGLE_API_KEY` / `GEMINI_API_KEY` | `gemini-flash-latest` |
-| openai (fallback) | `OPENAI_API_KEY` | `gpt-4o` |
-
-The OpenAI fallback is the same model family as the Reasoner and is flagged
-(`same_family=1`) in the DB and in reports — a true second family is better.
+The validator role comes from the active profile (`config/models.yaml`);
+override with `HYDRAMIND_VALIDATOR_PROVIDER` / `HYDRAMIND_VALIDATOR_MODEL`.
+If the configured provider is unavailable, an available provider is used and
+the fallback is printed; independence is recomputed against the *active*
+reasoner role and flagged (`same_family=1`) when families match.
 Google automatically falls back across `gemini-flash-latest` →
 `gemini-3-flash-preview` → `gemini-3.1-flash-lite` when a model is unavailable
 (404/429/503); API keys are redacted from stored validator errors. Unparseable
@@ -282,7 +317,7 @@ Scores recon → triage → reasoning quality against Web Security Academy labs 
    `allowed_tools`
 3. export your provider keys (the harness passes the environment through to
    `main.py`), then `python eval/run_eval.py` (optionally `--only sqli`,
-   `--limit 3`)
+   `--limit 3`, `--profile free`)
 
 Each lab scores 1.0 (expected tool + keyword), 0.5 (expected tool only) or 0.0.
 Artifacts: `eval/artifacts/<lab>.json|.log`, summary in
@@ -302,7 +337,8 @@ column containing text", `--ports 443`):
 ```
 
 Tests: `python tests/test_phase4.py` (validator parsing/provider selection,
-report rendering + HTML escaping, DB round-trips, eval scoring).
+model registry/families/independence, writer citations, report rendering +
+HTML escaping, DB round-trips, model-call logging, eval scoring).
 
 ## Lab targets (local, scope-listed, `environment: lab`)
 
@@ -333,5 +369,8 @@ Metasploit setup, so tests can run beyond localhost.
   same-family flagged), Markdown + HTML report writer from SQLite,
   `--dry-run`, `--validate-scan`, and the PortSwigger eval harness
   (dry-run scoring; live lab runs need Academy lab URLs + scope entries)
+- Phase 4.1 (done): role-based model registry + profiles (`hybrid/free/
+  quality/local`), Ollama/OpenRouter adapters, computed cross-family
+  independence, per-call logging (`model_calls`), opt-in grounded writer
 - Phase 5: n8n trigger/notify + dashboard
-- Phase 6: LangGraph agent + RAG (CVE/ExploitDB) + model router
+- Phase 6: LangGraph agent + RAG (CVE/ExploitDB) + richer routing policies

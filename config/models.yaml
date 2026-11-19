@@ -1,0 +1,43 @@
+# HydraMind model roles — switch models per role without touching code.
+#
+# Pick a profile:  python main.py --profile free ...
+# or:              export HYDRAMIND_PROFILE=free
+# Per-role override: HYDRAMIND_REASONER_PROVIDER / HYDRAMIND_REASONER_MODEL
+#                    (same pattern for TRIAGER, VALIDATOR, WRITER)
+#
+# Providers: openai | anthropic | google | openrouter | ollama | none
+#   ollama     = local, no API cost, set OLLAMA_BASE_URL if it runs on the host
+#                (default http://127.0.0.1:11434/v1)
+#   openrouter = free/paid OpenRouter models (OPENROUTER_API_KEY)
+#   none       = role disabled (writer=none keeps the deterministic report)
+#
+# Thesis rule: the validator MUST be a different model family than the
+# reasoner. The pipeline computes this and flags same_family in the DB/report;
+# set HYDRAMIND_REQUIRE_SECOND_FAMILY=1 to refuse validation otherwise.
+
+default_profile: hybrid
+
+profiles:
+  hybrid:                 # current verified setup (cloud triage + reasoning)
+    triager:   {provider: openai,    model: gpt-4o-mini}
+    reasoner:  {provider: openai,    model: gpt-4o}
+    validator: {provider: google,    model: gemini-flash-latest}
+    writer:    {provider: none,      model: ""}
+
+  free:                   # zero API cost (needs Ollama + Gemini free tier)
+    triager:   {provider: ollama,    model: llama3.1:8b}
+    reasoner:  {provider: google,    model: gemini-flash-latest}
+    validator: {provider: ollama,    model: mistral:7b}
+    writer:    {provider: none,      model: ""}
+
+  quality:                # best reasoning, local triage
+    triager:   {provider: ollama,    model: llama3.1:8b}
+    reasoner:  {provider: anthropic, model: claude-sonnet-4-5}
+    validator: {provider: google,    model: gemini-flash-latest}
+    writer:    {provider: none,      model: ""}
+
+  local:                  # fully offline; two different local families
+    triager:   {provider: ollama,    model: llama3.1:8b}
+    reasoner:  {provider: ollama,    model: qwen2.5:7b}
+    validator: {provider: ollama,    model: mistral:7b}
+    writer:    {provider: none,      model: ""}

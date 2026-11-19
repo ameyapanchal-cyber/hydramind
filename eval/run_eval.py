@@ -38,6 +38,7 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from engine import models  # noqa: E402
 from engine.scope_firewall import ScopeFirewall, ScopeError  # noqa: E402
 
 SCOPE_FILE = ROOT / "config" / "scope.yaml"
@@ -109,6 +110,8 @@ def run_lab(lab: dict, fw: ScopeFirewall, args) -> dict:
         "--ports", args.ports,
         "--json-report", str(artifact),
     ]
+    if args.profile:
+        cmd += ["--profile", args.profile]
     started = datetime.now(timezone.utc).isoformat()
     with log_path.open("w") as log:
         log.write(f"$ {' '.join(cmd)}\n\n")
@@ -144,7 +147,10 @@ def main() -> int:
     ap.add_argument("--python", default=os.environ.get("HYDRAMIND_PYTHON", sys.executable),
                     help="python interpreter for main.py (default: this venv)")
     ap.add_argument("--out-dir", default=str(ROOT / "eval" / "results"))
+    ap.add_argument("--profile", help="model profile for the pipeline "
+                                      "(hybrid/free/quality/local)")
     args = ap.parse_args()
+    models.configure(args.profile)
 
     labs_path = Path(args.labs)
     if not labs_path.exists():
@@ -163,7 +169,9 @@ def main() -> int:
 
     fw = ScopeFirewall(SCOPE_FILE)
     results = []
-    print(f"[eval] {len(labs)} lab(s) · model={os.environ.get('HYDRAMIND_REASONER_MODEL', 'gpt-4o')}")
+    rcfg = models.resolve_role("reasoner")
+    print(f"[eval] {len(labs)} lab(s) · profile {models.active_profile()} · "
+          f"reasoner {rcfg['provider']}/{rcfg['model']}")
     for lab in labs:
         print(f"\n[eval] {lab.get('name')} ({lab.get('category', '?')})")
         r = run_lab(lab, fw, args)
@@ -183,7 +191,8 @@ def main() -> int:
     out_path = out_dir / f"eval_{stamp}.json"
     summary = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
-        "reasoner_model": os.environ.get("HYDRAMIND_REASONER_MODEL", "gpt-4o"),
+        "profile": models.active_profile(),
+        "reasoner_model": f"{rcfg['provider']}/{rcfg['model']}",
         "labs": results,
         "summary": {
             "labs": len(results),

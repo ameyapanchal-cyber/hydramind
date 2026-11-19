@@ -63,6 +63,17 @@ def init_db():
             created_at TEXT NOT NULL,
             FOREIGN KEY(scan_id) REFERENCES scans(id),
             FOREIGN KEY(finding_id) REFERENCES triage_findings(id))""")
+        c.execute("""CREATE TABLE IF NOT EXISTS model_calls (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, scan_id INTEGER,
+            role TEXT NOT NULL, profile TEXT, provider TEXT, model TEXT,
+            prompt_hash TEXT, latency_ms INTEGER,
+            tokens_in INTEGER, tokens_out INTEGER,
+            response TEXT, error TEXT, created_at TEXT NOT NULL)""")
+        c.execute("""CREATE TABLE IF NOT EXISTS scan_summaries (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, scan_id INTEGER NOT NULL,
+            summary TEXT NOT NULL, provider TEXT, model TEXT,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(scan_id) REFERENCES scans(id))""")
         # Migration: older DBs lack the columns for gobuster/nikto findings
         cols = {r["name"] for r in c.execute("PRAGMA table_info(findings)")}
         for col, typ in (("tool", "TEXT"), ("path", "TEXT"),
@@ -230,6 +241,49 @@ def log_scope_event(target: str, tool: str, allowed: bool, reason: str = "") -> 
             " VALUES (?, ?, ?, ?, ?)",
             (target, tool, int(allowed), reason, _now()))
         return cur.lastrowid
+
+
+def log_model_call(scan_id: int | None, role: str, profile: str, provider: str,
+                   model: str, prompt_hash: str, latency_ms: int,
+                   tokens_in: int | None, tokens_out: int | None,
+                   response: str = "", error: str = "") -> int:
+    """One row per model invocation — the reproducibility audit trail."""
+    with _conn() as c:
+        cur = c.execute(
+            """INSERT INTO model_calls (scan_id, role, profile, provider, model,
+                                        prompt_hash, latency_ms, tokens_in,
+                                        tokens_out, response, error, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (scan_id, role, profile, provider, model, prompt_hash,
+             int(latency_ms), tokens_in, tokens_out, response, error, _now()))
+        return cur.lastrowid
+
+
+def model_calls_for_scan(scan_id: int) -> list[dict]:
+    with _conn() as c:
+        rows = c.execute(
+            "SELECT * FROM model_calls WHERE scan_id = ? ORDER BY id",
+            (scan_id,)).fetchall()
+        return [dict(r) for r in rows]
+
+
+def save_summary(scan_id: int, summary: str, provider: str, model: str) -> int:
+    with _conn() as c:
+        c.execute("DELETE FROM scan_summaries WHERE scan_id = ?", (scan_id,))
+        cur = c.execute(
+            """INSERT INTO scan_summaries (scan_id, summary, provider, model,
+                                           created_at)
+               VALUES (?, ?, ?, ?, ?)""",
+            (scan_id, summary, provider, model, _now()))
+        return cur.lastrowid
+
+
+def summary_for_scan(scan_id: int) -> dict | None:
+    with _conn() as c:
+        row = c.execute(
+            "SELECT * FROM scan_summaries WHERE scan_id = ? ORDER BY id DESC"
+            " LIMIT 1", (scan_id,)).fetchone()
+        return dict(row) if row else None
 
 
 def action_history(target: str, limit: int = 10) -> list[dict]:

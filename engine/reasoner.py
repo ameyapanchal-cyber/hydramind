@@ -1,6 +1,6 @@
 """
-AI Reasoner — the strategic core (GPT-4o by default, override with
-HYDRAMIND_REASONER_MODEL). Reasons about ONE finding at a time, aware of
+AI Reasoner — the strategic core (reasoner role in config/models.yaml:
+GPT-4o / Claude / Gemini / local Ollama). Reasons about ONE finding at a time, aware of
 sibling findings and the history of already-approved/executed actions for the
 target, so attack chains build step by step — one human-approved action at a
 time — instead of a pre-committed batch plan.
@@ -10,25 +10,13 @@ executor: nothing runs unless its proposed command survives it (fail-closed).
 """
 from __future__ import annotations
 import json
-import os
 import re
 import shlex
 from dataclasses import dataclass, asdict
 from pathlib import Path
 
-from openai import OpenAI
-
+from engine import models
 from engine.findings import Finding
-
-_client = None
-
-
-def _get_client() -> OpenAI:
-    """Lazy init so a missing OPENAI_API_KEY doesn't crash at import time."""
-    global _client
-    if _client is None:
-        _client = OpenAI()  # reads OPENAI_API_KEY from environment
-    return _client
 
 
 # Tools the executor can actually run (Phase 3: curl/sqlmap/redis-cli/hydra/
@@ -146,7 +134,8 @@ def _clean_text(value, limit=600) -> str:
     return str(value or "").strip()[:limit]
 
 
-def reason_about_finding(finding: Finding, full_context: dict) -> ReasonerOutput:
+def reason_about_finding(finding: Finding, full_context: dict,
+                         scan_id: int | None = None) -> ReasonerOutput:
     """
     finding: the single Finding to reason about.
     full_context: {
@@ -169,17 +158,9 @@ def reason_about_finding(finding: Finding, full_context: dict) -> ReasonerOutput
         "context": {"sibling_findings": siblings, "action_history": history},
     }, indent=2, default=str)
 
-    model = os.environ.get("HYDRAMIND_REASONER_MODEL", "gpt-4o")
-    response = _get_client().chat.completions.create(
-        model=model,
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user_msg},
-        ],
-        temperature=0.3,
-        response_format={"type": "json_object"},  # JSON mode → structured output
-    )
-    return parse_reasoner_output(response.choices[0].message.content)
+    reply = models.chat("reasoner", SYSTEM_PROMPT, user_msg,
+                        temperature=0.3, json_mode=True, scan_id=scan_id)
+    return parse_reasoner_output(reply.text)
 
 
 def parse_reasoner_output(raw: str) -> ReasonerOutput:

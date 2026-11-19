@@ -25,11 +25,10 @@ from engine.triager import triage
 from engine.reasoner import reason_about_finding, validate_action
 from engine.validator import validate_scan, provider_config
 from engine.findings import finding_from_tool, finding_from_triage
-from engine import db, reporter
+from engine import db, models, reporter
 
 SCOPE_FILE = Path(__file__).resolve().parent / "config" / "scope.yaml"
 GOBUSTER_WORDLIST_ROOT = Path("/usr/share/wordlists")
-REASONER_MODEL = os.environ.get("HYDRAMIND_REASONER_MODEL", "gpt-4o")
 WEB_PORTS = (80, 443, 3000, 5000, 8000, 8080, 8081, 8443, 8888, 9000)
 
 
@@ -185,8 +184,10 @@ def _execute_action(tool: str, args: list[str], target: str,
 
 def _ai_fail_hint(e: Exception) -> str:
     msg = str(e).lower()
-    if "api key" in msg or "credentials" in msg or "api_key" in msg:
-        return "  (hint: export OPENAI_API_KEY=sk-...)"
+    if any(k in msg for k in ("api key", "credentials", "api_key", "not available")):
+        return ("  (hint: check config/models.yaml profile keys — OPENAI_API_KEY, "
+                "ANTHROPIC_API_KEY, GOOGLE_API_KEY, OPENROUTER_API_KEY, or "
+                "start Ollama on OLLAMA_BASE_URL)")
     return ""
 
 
@@ -206,7 +207,10 @@ def main() -> int:
     ap.add_argument("--json-report", help="path for the raw JSON report (default data/report_<id>.json)")
     ap.add_argument("--no-validate", action="store_true", help="skip the second-model validator")
     ap.add_argument("--no-report", action="store_true", help="skip Markdown/HTML report generation")
+    ap.add_argument("--profile", help="model profile from config/models.yaml "
+                                      "(hybrid/free/quality/local); env HYDRAMIND_PROFILE")
     args = ap.parse_args()
+    models.configure(args.profile)
 
     if args.report is not None:
         db.init_db()
@@ -229,9 +233,19 @@ def main() -> int:
             print("[validator] no API key — set ANTHROPIC_API_KEY, "
                   "GOOGLE_API_KEY/GEMINI_API_KEY or OPENAI_API_KEY")
             return 1
+        if cfg.get("fallback_from"):
+            print(f"[validator] {cfg['fallback_from']} unavailable — using "
+                  f"{cfg['provider']}/{cfg['model']}")
         print(f"[validator] {cfg['provider']}/{cfg['model']} over scan "
               f"{args.validate_scan}...")
         validate_scan(args.validate_scan)
+        try:
+            from engine.writer import generate_summary
+            written = generate_summary(args.validate_scan)
+            if written:
+                print(f"[writer] summary via {written['provider']}/{written['model']}")
+        except Exception as e:
+            print(f"[writer] skipped: {e}")
         paths = reporter.write_reports(args.validate_scan)
         print(f"[report] markdown → {paths['markdown']}")
         print(f"[report] html     → {paths['html']}")
@@ -251,6 +265,7 @@ def main() -> int:
     db.init_db()
     db.log_scope_event(target, "recon", True, "")
     print(f"[scope] '{target}' authorized.\n")
+    print(models.role_summary())
 
     scan_id = db.new_scan(target, tool="phase4")
     all_findings = {}
@@ -323,9 +338,11 @@ def main() -> int:
     if total == 0:
         print("\n[triager] No findings to triage. Clean result."); return 0
 
-    print(f"\n[triager] sending {total} finding(s) to GPT-4o-mini for analysis...")
+    tcfg = models.resolve_role("triager")
+    print(f"\n[triager] sending {total} finding(s) to "
+          f"{tcfg['provider']}/{tcfg['model']} for analysis...")
     try:
-        triage_report = triage(all_findings)
+        triage_report = triage(all_findings, scan_id=scan_id)
     except Exception as e:
         print(f"[triager] AI call failed: {e}{_ai_fail_hint(e)}"); return 1
 
@@ -344,10 +361,11 @@ def main() -> int:
     triage_ids = db.save_triage_findings(scan_id, ranked)
 
     # 6. Per-finding Reasoner + HUMAN APPROVAL GATE
+    rcfg = models.resolve_role("reasoner")
     print("="*60)
     mode = ("DRY RUN — proposals only, nothing executes" if args.dry_run
             else "APPROVAL GATE — one finding at a time")
-    print(f"  REASONER ({REASONER_MODEL}) + {mode}")
+    print(f"  REASONER ({rcfg['provider']}/{rcfg['model']}) + {mode}")
     print("="*60)
     decisions = []
     for item, finding_id in zip(ranked, triage_ids):
@@ -364,7 +382,7 @@ def main() -> int:
         print(f"\n--- Finding #{item['rank']} [{item.get('severity', '?')}] "
               f"{item['finding']}")
         try:
-            out = reason_about_finding(finding, context)
+            out = reason_about_finding(finding, context, scan_id=scan_id)
         except Exception as e:
             print(f"[reasoner] AI call failed: {e}{_ai_fail_hint(e)}"); return 1
 
@@ -444,27 +462,43 @@ def main() -> int:
         if cfg["provider"] == "none":
             print("\n[validator] skipped — no ANTHROPIC/GOOGLE/OPENAI key.")
         else:
-            same = " (same family as reasoner)" if cfg["same_family"] else ""
-            print(f"\n[validator] second-model cross-check via "
+            same = " (SAME FAMILY as reasoner — independence flagged)" if cfg["same_family"] else ""
+            if cfg.get("fallback_from"):
+                print(f"\n[validator] {cfg['fallback_from']} unavailable — "
+                      f"using {cfg['provider']}/{cfg['model']}")
+            print(f"[validator] second-model cross-check via "
                   f"{cfg['provider']}/{cfg['model']}{same}...")
             validation_results = validate_scan(scan_id)
 
-    # 8. Save full JSON report (path overridable for eval harnesses)
+    # 8. Optional grounded writer summary (LLM disabled by default)
+    if not args.dry_run and not args.no_report:
+        try:
+            from engine.writer import generate_summary
+            written = generate_summary(scan_id)
+            if written:
+                print(f"\n[writer] summary via "
+                      f"{written['provider']}/{written['model']}")
+        except Exception as e:
+            print(f"\n[writer] skipped: {e}")
+
+    # 9. Save full JSON report (path overridable for eval harnesses)
     report_path = (Path(args.json_report) if args.json_report
                    else Path("data") / f"report_{scan_id}.json")
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text(json.dumps({
         "scan_id": scan_id,
         "target": target,
+        "profile": models.active_profile(),
         "dry_run": args.dry_run,
         "raw": all_findings,
         "triage": triage_report,
         "decisions": decisions,
         "validations": db.validations_for_scan(scan_id),
+        "llm_summary": db.summary_for_scan(scan_id),
     }, indent=2))
     print(f"\n[db] full report saved → {report_path}")
 
-    # 9. Markdown + HTML report from the audit trail
+    # 10. Markdown + HTML report from the audit trail
     if not args.no_report:
         paths = reporter.write_reports(scan_id)
         print(f"[report] markdown → {paths['markdown']}")
