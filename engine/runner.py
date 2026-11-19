@@ -1,6 +1,8 @@
 """Safe subprocess wrapper for CLI tools (nmap, gobuster, nikto, ...)."""
 from __future__ import annotations
+import os
 import shutil
+import signal
 import subprocess
 from dataclasses import dataclass
 
@@ -24,15 +26,21 @@ def run_tool(command: list, timeout: int = 300) -> ToolResult:
         raise FileNotFoundError(
             f"'{binary}' is not installed. On Kali: sudo apt install {binary}"
         )
+    proc = subprocess.Popen(
+        command,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
     try:
-        proc = subprocess.run(command, capture_output=True, text=True, timeout=timeout)
-        return ToolResult(command, proc.returncode, proc.stdout, proc.stderr)
-    except subprocess.TimeoutExpired as e:
-        # TimeoutExpired.stdout/.stderr are bytes even when text=True
-        out = e.stdout or ""
-        err = e.stderr or ""
-        if isinstance(out, bytes):
-            out = out.decode(errors="replace")
-        if isinstance(err, bytes):
-            err = err.decode(errors="replace")
-        return ToolResult(command, -1, out, err, timed_out=True)
+        out, err = proc.communicate(timeout=timeout)
+        return ToolResult(command, proc.returncode, out, err)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        out, err = proc.communicate()
+        return ToolResult(command, -1, out or "", err or "", timed_out=True)

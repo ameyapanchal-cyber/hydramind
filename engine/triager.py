@@ -20,7 +20,8 @@ def _get_client() -> OpenAI:
     return _client
 
 SYSTEM_PROMPT = """You are a penetration testing AI assistant.
-You will receive a JSON list of findings from recon tools (nmap, gobuster, nikto).
+You will receive a JSON list of findings from recon tools (nmap, gobuster,
+nikto) and possibly user-supplied endpoints (source "user").
 Your job is to rank them by risk and explain each one clearly.
 
 Respond ONLY with valid JSON in this exact format:
@@ -29,7 +30,7 @@ Respond ONLY with valid JSON in this exact format:
     {
       "rank": 1,
       "severity": "HIGH|MEDIUM|LOW|INFO",
-      "source": "nmap|gobuster|nikto",
+      "source": "nmap|gobuster|nikto|user",
       "finding": "<brief description>",
       "why": "<why this matters for a pentester>",
       "next_step": "<the single most useful next action>"
@@ -37,7 +38,8 @@ Respond ONLY with valid JSON in this exact format:
   ],
   "summary": "<2-3 sentence overall assessment>"
 }
-Only include findings worth investigating. Filter out pure noise."""
+Only include findings worth investigating. Filter out pure noise.
+User-supplied endpoints are explicit priorities — always include them."""
 
 
 def triage(all_findings: dict) -> dict:

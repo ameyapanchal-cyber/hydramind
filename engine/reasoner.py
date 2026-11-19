@@ -31,8 +31,10 @@ def _get_client() -> OpenAI:
     return _client
 
 
-# Tools the executor can actually run (Phase 3 added curl/sqlmap/redis-cli)
-KNOWN_TOOLS = {"nmap", "gobuster", "nikto", "curl", "sqlmap", "redis-cli"}
+# Tools the executor can actually run (Phase 3: curl/sqlmap/redis-cli/hydra/
+# wpscan/commix)
+KNOWN_TOOLS = {"nmap", "gobuster", "nikto", "curl", "sqlmap", "redis-cli",
+               "hydra", "wpscan", "commix"}
 
 # args that write/read files or otherwise escape the intended scan
 BLOCKED_NMAP_ARGS = {"-oN", "-oX", "-oG", "-oA", "-oS", "-iL", "--datadir",
@@ -41,6 +43,9 @@ BLOCKED_CURL_FLAGS = {"-o", "-O", "--output", "-T", "--upload-file", "-K",
                       "--config", "-F"}
 BLOCKED_SQLMAP_FLAGS = {"--os-shell", "--os-pwn", "--sql-shell",
                         "--file-write", "--file-dest"}
+BLOCKED_HYDRA_FLAGS = {"-o", "-M", "-I"}
+BLOCKED_WPSCAN_FLAGS = {"-o", "--output"}
+BLOCKED_COMMIX_FLAGS = {"--os-shell"}
 BLOCKED_REDIS_COMMANDS = {"FLUSHALL", "FLUSHDB", "SHUTDOWN", "DEBUG",
                           "SLAVEOF", "REPLICAOF"}
 MAX_ARGS = 20
@@ -72,6 +77,14 @@ Available binaries (the first token must be exactly one of these):
   sqlmap -u 'http://host:8081/vulnerabilities/sqli/?id=1' --batch
 - redis-cli — Redis interaction. Always pass -h <target> -p <port>. Example:
   redis-cli -h 127.0.0.1 -p 6379 INFO
+- hydra — credential brute-force. Wordlists must live under
+  /usr/share/wordlists. Example:
+  hydra -l admin -P /usr/share/wordlists/rockyou.txt ssh://host
+- wpscan — WordPress enumeration/vulnerability scanning. Example:
+  wpscan --url http://host:8081 --no-banner
+- commix — OS command injection testing. Example:
+  commix -u 'http://host:8081/vulnerabilities/exec/' \
+    --data 'ip=127.0.0.1&Submit=Submit'
 
 Choosing the tool:
 - finding says a file/path is accessible (php.ini, robots.txt, .htpasswd,
@@ -81,13 +94,18 @@ Choosing the tool:
   path with a POST payload only after traversal is confirmed).
 - open Redis without auth: use redis-cli (PING, INFO, CONFIG GET dir, KEYS *).
 - parameterized URL/endpoint: consider sqlmap.
+- form/URL that runs a system command (ping, nslookup, exec pages): commix.
+- login form or SSH/FTP service: hydra (only with a wordlist under
+  /usr/share/wordlists).
+- WordPress detected (wp-content, wp-login.php): wpscan.
 - do not repeat an action history already shows ran — unless it failed only
   because the port/URL was wrong; then fix the port and retry.
 
 risk_level classification:
 - "passive": enumeration (nmap/gobuster/nikto, read-only GET of a public file)
 - "active": probing beyond recon (traversal read, redis INFO/CONFIG GET)
-- "exploit": payload delivery / RCE / sqlmap / state-changing redis commands
+- "exploit": payload delivery / RCE / sqlmap / commix / hydra /
+  state-changing redis commands
 
 Respond ONLY with valid JSON:
 {
@@ -102,6 +120,8 @@ Hard rules for exact_tool_and_command:
 - write the target literally as given in the input — never a placeholder
 - if the findings reference a non-standard web port, use that exact URL in the
   command (e.g. http://host:8081) — never silently assume port 80
+- never include credentials, cookies or tokens in the command — the executor
+  injects the configured session cookie automatically
 - no shell chaining: no ; | && || backticks sudo
 - no file input/output arguments (-o, -O, -T, @file, --config)
 - if nothing sensible is possible, propose the best passive verification"""
@@ -217,6 +237,12 @@ def validate_action(command: str, target: str) -> dict | None:
             return None
         if tool == "sqlmap" and a in BLOCKED_SQLMAP_FLAGS:
             return None
+        if tool == "hydra" and a in BLOCKED_HYDRA_FLAGS:
+            return None
+        if tool == "wpscan" and a in BLOCKED_WPSCAN_FLAGS:
+            return None
+        if tool == "commix" and a in BLOCKED_COMMIX_FLAGS:
+            return None
         if tool == "redis-cli" and a.upper() in BLOCKED_REDIS_COMMANDS:
             return None
     # the command must actually aim at the scoped target
@@ -224,4 +250,9 @@ def validate_action(command: str, target: str) -> dict | None:
         return None
     if tool == "sqlmap" and not ({"-u", "--url"} & set(args)):
         return None
+    if tool == "hydra":
+        for i, a in enumerate(args):
+            if a in ("-P", "-p") and i + 1 < len(args):
+                if not args[i + 1].startswith("/usr/share/wordlists/"):
+                    return None
     return {"tool": tool, "args": args, "command": command.strip()}

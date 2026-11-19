@@ -15,6 +15,9 @@ from engine.tools.nikto_tool import run_nikto, parse_nikto
 from engine.tools.curl_tool import run_curl, parse_curl
 from engine.tools.sqlmap_tool import run_sqlmap, parse_sqlmap
 from engine.tools.redis_tool import run_redis, parse_redis
+from engine.tools.hydra_tool import run_hydra, parse_hydra
+from engine.tools.wpscan_tool import run_wpscan, parse_wpscan
+from engine.tools.commix_tool import run_commix, parse_commix
 from engine.triager import triage
 from engine.reasoner import reason_about_finding, validate_action
 from engine.findings import finding_from_tool, finding_from_triage
@@ -67,7 +70,7 @@ def _web_url(target: str, port: int) -> str:
 def _url_from_args(args: list[str], target: str) -> str | None:
     """Extract a validated -u/-h URL from a proposed command; must reference
     the scoped target (a non-standard web port then survives into execution)."""
-    for flag in ("-u", "-h"):
+    for flag in ("-u", "-h", "--url"):
         if flag in args:
             i = args.index(flag)
             if i + 1 < len(args) and target.lower() in args[i + 1].lower():
@@ -76,8 +79,10 @@ def _url_from_args(args: list[str], target: str) -> str | None:
 
 
 def _execute_action(tool: str, args: list[str], target: str,
-                    default_url: str | None = None) -> tuple[list[dict], str]:
+                    default_url: str | None = None,
+                    cookie: str | None = None) -> tuple[list[dict], str]:
     """Run an approved, validated action through runner.py.
+    The session cookie (--cookie) is injected here, never by the AI.
     Returns (findings, summary)."""
     if tool == "nmap":
         extra = [a for a in args if target.lower() not in a.lower()]
@@ -101,7 +106,10 @@ def _execute_action(tool: str, args: list[str], target: str,
         return findings, f"{status}, {len(findings)} finding(s) @ {url}"
 
     if tool == "curl":
-        result = run_curl(args)
+        run_args = list(args)
+        if cookie and "-b" not in run_args and "--cookie" not in run_args:
+            run_args = ["-b", cookie] + run_args
+        result = run_curl(run_args)
         findings = [] if result.timed_out else parse_curl(result)
         status = "timed out" if result.timed_out else f"rc={result.returncode}"
         body = (result.stdout or result.stderr or "").strip().replace("\n", " ")[:220]
@@ -120,6 +128,8 @@ def _execute_action(tool: str, args: list[str], target: str,
                 skip = True
                 continue
             extra.append(a)
+        if cookie and "--cookie" not in extra:
+            extra += ["--cookie", cookie]
         result = run_sqlmap(url, extra=extra)
         findings = [] if result.timed_out else parse_sqlmap(result)
         status = "timed out" if result.timed_out else f"rc={result.returncode}"
@@ -131,6 +141,40 @@ def _execute_action(tool: str, args: list[str], target: str,
         status = "timed out" if result.timed_out else f"rc={result.returncode}"
         out = (result.stdout or result.stderr or "").strip().replace("\n", " ")[:220]
         return findings, f"{status}, {len(findings)} finding(s) — {out}"
+
+    if tool == "hydra":
+        result = run_hydra(args)
+        findings = [] if result.timed_out else parse_hydra(result)
+        status = "timed out" if result.timed_out else f"rc={result.returncode}"
+        out = (result.stdout or result.stderr or "").strip().replace("\n", " ")[-220:]
+        return findings, f"{status}, {len(findings)} finding(s) — {out}"
+
+    if tool == "wpscan":
+        url = _url_from_args(args, target)
+        if not url:
+            return [], "no --url referencing the target — not executed"
+        extra, skip = [], False
+        for a in args:
+            if skip:
+                skip = False
+                continue
+            if a == "--url":
+                skip = True
+                continue
+            extra.append(a)
+        result = run_wpscan(url, extra=extra)
+        findings = [] if result.timed_out else parse_wpscan(result)
+        status = "timed out" if result.timed_out else f"rc={result.returncode}"
+        return findings, f"{status}, {len(findings)} finding(s)"
+
+    if tool == "commix":
+        run_args = list(args)
+        if cookie and "--cookie" not in run_args:
+            run_args += ["--cookie", cookie]
+        result = run_commix(run_args)
+        findings = [] if result.timed_out else parse_commix(result)
+        status = "timed out" if result.timed_out else f"rc={result.returncode}"
+        return findings, f"{status}, {len(findings)} finding(s)"
 
     return [], "not executed"
 
@@ -147,6 +191,8 @@ def main() -> int:
     ap.add_argument("--target", required=True)
     ap.add_argument("--skip-nikto", action="store_true", help="skip nikto (slow)")
     ap.add_argument("--ports", help="nmap port spec (e.g. 1-10000, 6379,8080)")
+    ap.add_argument("--seed-url", help="user-supplied endpoint to analyze (must be in scope)")
+    ap.add_argument("--cookie", help="session cookie injected into sqlmap/curl (never logged)")
     args = ap.parse_args()
 
     # 1. Scope gate (stage 1: host authorization)
@@ -214,6 +260,18 @@ def main() -> int:
         all_findings["nikto"] = []
 
     web_url = web_urls[0] if web_urls else None
+
+    # 4b. user-supplied endpoint (explicit priority, still must be in scope)
+    if args.seed_url:
+        if target not in args.seed_url.lower():
+            print(f"[seed] ignored: '{args.seed_url}' does not reference target "
+                  f"'{target}'.")
+            return 1
+        all_findings["user"] = [{"url": args.seed_url,
+                                 "detail": args.seed_url,
+                                 "path": args.seed_url}]
+        db.save_findings(scan_id, "user", all_findings["user"])
+        print(f"[seed] user endpoint queued for triage: {args.seed_url}")
 
     # 5. AI Triage
     total = sum(len(v) for v in all_findings.values())
@@ -301,7 +359,8 @@ def main() -> int:
             else:
                 print(f"  → running...")
                 new_findings, result_text = _execute_action(
-                    action["tool"], action["args"], target, default_url=web_url)
+                    action["tool"], action["args"], target, default_url=web_url,
+                    cookie=args.cookie)
                 executed = True
                 db.save_findings(scan_id, action["tool"], new_findings)
                 db.log_action(scan_id, item["rank"], action["tool"],
