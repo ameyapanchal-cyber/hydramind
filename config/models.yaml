@@ -7,7 +7,8 @@
 #
 # Providers: openai | anthropic | google | openrouter | ollama | none
 #   ollama     = local, no API cost, set OLLAMA_BASE_URL if it runs on the host
-#                (default http://127.0.0.1:11434/v1)
+#                (default http://127.0.0.1:11434/v1; VirtualBox NAT:
+#                 http://10.0.2.2:11434/v1)
 #   openrouter = free/paid OpenRouter models (OPENROUTER_API_KEY)
 #   none       = role disabled (writer=none keeps the deterministic report)
 #

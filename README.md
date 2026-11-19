@@ -21,7 +21,9 @@ export GOOGLE_API_KEY=...         # hybrid profile: validator (Gemini)
 export ANTHROPIC_API_KEY=...
 export OPENROUTER_API_KEY=...
 # optional local models: install Ollama, then `ollama pull llama3.1:8b mistral:7b`
-# export OLLAMA_BASE_URL=http://127.0.0.1:11434/v1   # default; point at the host if needed
+# export OLLAMA_BASE_URL=http://127.0.0.1:11434/v1   # default
+# VirtualBox NAT — Ollama on the Windows host, no firewall changes:
+# export OLLAMA_BASE_URL=http://10.0.2.2:11434/v1
 ```
 
 ## Run
@@ -85,6 +87,19 @@ HYDRAMIND_REASONER_MODEL=claude-sonnet-4-5 python3 main.py ...
 - **Writer is opt-in**: `writer: none` keeps the deterministic report. When
   enabled, the writer only sees validated findings and must cite `[F#]` IDs;
   a failed citation check discards the summary and keeps the deterministic one.
+
+Measured `free` profile run (Ollama on the Windows host via VirtualBox NAT
+`10.0.2.2`; DVWA, 14 raw findings → 9 triaged):
+
+| Role | Model | Calls | Latency |
+|---|---|---|---|
+| triager | llama3.1:8b (GPU) | 1 | 126 s |
+| reasoner | Gemini free tier (fallback `gemini-3.1-flash-lite`) | 9 | avg 119 s, max 299 s |
+| validator | mistral:7b (GPU) | 9 | avg 18 s |
+
+Zero errors, all validations `same_family=0`. Expect ~20 min for a dry-run and
+noisier triage than `hybrid` (generic LOW items like favicon/robots); the
+validator correctly marks unexecuted dry-run findings `needs_review`.
 
 ### Scope firewall — two-stage authorization
 `config/scope.yaml` supports two forms side by side:
