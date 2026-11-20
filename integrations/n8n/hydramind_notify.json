@@ -1,0 +1,62 @@
+{
+  "name": "HydraMind notify",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "hydramind",
+        "responseMode": "onReceived",
+        "options": {}
+      },
+      "id": "a1b2c3d4-0000-4000-8000-000000000001",
+      "name": "HydraMind webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [-260, 0],
+      "webhookId": "hydramind"
+    },
+    {
+      "parameters": {
+        "jsCode": "const p = $json.body || $json;\nconst d = p.data || {};\nconst lines = [\n  `HydraMind: ${p.event}`,\n  d.target ? `Target: ${d.target}` : null,\n  d.scan_id ? `Scan: #${d.scan_id}` : null,\n  d.profile ? `Profile: ${d.profile}` : null,\n  d.verdicts && Object.keys(d.verdicts).length ? `Verdicts: ${Object.entries(d.verdicts).map(([k, v]) => `${k}=${v}`).join(', ')}` : null,\n  d.reason ? `Reason: ${d.reason}` : null,\n].filter(Boolean);\nreturn [{ json: { event: p.event, message: lines.join('\\n'), payload: p } }];"
+      },
+      "id": "a1b2c3d4-0000-4000-8000-000000000002",
+      "name": "Format message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-40, 0]
+    },
+    {
+      "parameters": {},
+      "id": "a1b2c3d4-0000-4000-8000-000000000003",
+      "name": "Send notification (replace me)",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [200, 0]
+    },
+    {
+      "parameters": {
+        "content": "## HydraMind events\n\nPoint HydraMind at this workflow's production webhook URL:\n\n`HYDRAMIND_N8N_WEBHOOK=https://<n8n>/webhook/hydramind`\n\nEvents: `scan_started`, `scan_refused`, `scan_finished`, `validation_finished`.\n\nReplace **Send notification** with Slack, Telegram, email, Discord, etc. and map `{{ $json.message }}` as the body. Payloads are redacted; no cookies or API keys are sent.",
+        "height": 260,
+        "width": 380
+      },
+      "id": "a1b2c3d4-0000-4000-8000-000000000004",
+      "name": "Setup notes",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [-300, 260]
+    }
+  ],
+  "connections": {
+    "HydraMind webhook": {
+      "main": [[{ "node": "Format message", "type": "main", "index": 0 }]]
+    },
+    "Format message": {
+      "main": [[{ "node": "Send notification (replace me)", "type": "main", "index": 0 }]]
+    }
+  },
+  "active": false,
+  "settings": { "executionOrder": "v1" },
+  "pinData": {},
+  "meta": { "templateCredsSetupCompleted": false },
+  "tags": []
+}

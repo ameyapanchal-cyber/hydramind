@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""HydraMind — Phase 4. Usage: python3 main.py --target 127.0.0.1
+"""HydraMind — Phase 5. Usage: python3 main.py --target 127.0.0.1
 
 Pipeline: scope check -> recon (nmap/gobuster/nikto, all logged) -> AI triage
 -> per-finding AI Reasoner (GPT-4o) -> HUMAN APPROVAL GATE -> approved actions
@@ -25,7 +25,7 @@ from engine.triager import triage
 from engine.reasoner import reason_about_finding, validate_action
 from engine.validator import validate_scan, provider_config
 from engine.findings import finding_from_tool, finding_from_triage
-from engine import db, models, reporter
+from engine import db, models, notifier, reporter
 
 SCOPE_FILE = Path(__file__).resolve().parent / "config" / "scope.yaml"
 GOBUSTER_WORDLIST_ROOT = Path("/usr/share/wordlists")
@@ -192,7 +192,7 @@ def _ai_fail_hint(e: Exception) -> str:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="HydraMind (Phase 4)")
+    ap = argparse.ArgumentParser(description="HydraMind (Phase 5)")
     ap.add_argument("--target", help="host to test (required unless --report/--validate-scan)")
     ap.add_argument("--skip-nikto", action="store_true", help="skip nikto (slow)")
     ap.add_argument("--ports", help="nmap port spec (e.g. 1-10000, 6379,8080)")
@@ -209,8 +209,12 @@ def main() -> int:
     ap.add_argument("--no-report", action="store_true", help="skip Markdown/HTML report generation")
     ap.add_argument("--profile", help="model profile from config/models.yaml "
                                       "(hybrid/free/quality/local); env HYDRAMIND_PROFILE")
+    ap.add_argument("--webhook", help="n8n webhook URL for scan events "
+                                      "(default env HYDRAMIND_N8N_WEBHOOK)")
+    ap.add_argument("--no-notify", action="store_true", help="disable n8n webhook events")
     args = ap.parse_args()
     models.configure(args.profile)
+    notifier.configure(args.webhook, enabled=not args.no_notify)
 
     if args.report is not None:
         db.init_db()
@@ -249,6 +253,9 @@ def main() -> int:
         paths = reporter.write_reports(args.validate_scan)
         print(f"[report] markdown → {paths['markdown']}")
         print(f"[report] html     → {paths['html']}")
+        scan = db.scan_row(args.validate_scan) or {}
+        notifier.validation_finished(args.validate_scan, scan.get("target", ""),
+                                     models.active_profile(), paths)
         return 0
 
     if not args.target:
@@ -261,6 +268,7 @@ def main() -> int:
     except ScopeError as e:
         db.init_db()
         db.log_scope_event(args.target, "recon", False, str(e))
+        notifier.scan_refused(args.target, str(e), models.active_profile())
         print(f"\n{e}\n"); return 1
     db.init_db()
     db.log_scope_event(target, "recon", True, "")
@@ -268,6 +276,7 @@ def main() -> int:
     print(models.role_summary())
 
     scan_id = db.new_scan(target, tool="phase4")
+    notifier.scan_started(scan_id, target, models.active_profile(), args.dry_run)
     all_findings = {}
 
     # 2. nmap
@@ -326,6 +335,8 @@ def main() -> int:
         if target not in args.seed_url.lower():
             print(f"[seed] ignored: '{args.seed_url}' does not reference target "
                   f"'{target}'.")
+            notifier.scan_failed(scan_id, target, models.active_profile(),
+                                 "seed-url", "seed URL does not reference the target")
             return 1
         all_findings["user"] = [{"url": args.seed_url,
                                  "detail": args.seed_url,
@@ -336,7 +347,9 @@ def main() -> int:
     # 5. AI Triage
     total = sum(len(v) for v in all_findings.values())
     if total == 0:
-        print("\n[triager] No findings to triage. Clean result."); return 0
+        print("\n[triager] No findings to triage. Clean result.")
+        notifier.scan_finished(scan_id, target, models.active_profile(), args.dry_run)
+        return 0
 
     tcfg = models.resolve_role("triager")
     print(f"\n[triager] sending {total} finding(s) to "
@@ -344,7 +357,9 @@ def main() -> int:
     try:
         triage_report = triage(all_findings, scan_id=scan_id)
     except Exception as e:
-        print(f"[triager] AI call failed: {e}{_ai_fail_hint(e)}"); return 1
+        print(f"[triager] AI call failed: {e}{_ai_fail_hint(e)}")
+        notifier.scan_failed(scan_id, target, models.active_profile(), "triager", e)
+        return 1
 
     print("\n" + "="*60)
     print("  HYDRAMIND — TRIAGE REPORT")
@@ -384,7 +399,9 @@ def main() -> int:
         try:
             out = reason_about_finding(finding, context, scan_id=scan_id)
         except Exception as e:
-            print(f"[reasoner] AI call failed: {e}{_ai_fail_hint(e)}"); return 1
+            print(f"[reasoner] AI call failed: {e}{_ai_fail_hint(e)}")
+            notifier.scan_failed(scan_id, target, models.active_profile(), "reasoner", e)
+            return 1
 
         action = validate_action(out.exact_tool_and_command, target)
         guard = "" if action else "  [guard] proposed command failed safety validation — will NOT run"
@@ -499,10 +516,15 @@ def main() -> int:
     print(f"\n[db] full report saved → {report_path}")
 
     # 10. Markdown + HTML report from the audit trail
+    paths = {}
     if not args.no_report:
         paths = reporter.write_reports(scan_id)
         print(f"[report] markdown → {paths['markdown']}")
         print(f"[report] html     → {paths['html']}")
+
+    # 11. Notify n8n (no-op unless a webhook is configured)
+    notifier.scan_finished(scan_id, target, models.active_profile(),
+                           args.dry_run, paths)
     return 0
 
 

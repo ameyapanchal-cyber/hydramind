@@ -38,6 +38,9 @@ python3 main.py --validate-scan 6    # re-run the validator on an existing scan
 python3 main.py --report 6           # Markdown + HTML from the audit trail
 python3 main.py --target 127.0.0.1 --skip-nikto --profile free    # zero-cost stack
 python3 main.py --target 127.0.0.1 --skip-nikto --profile quality # Claude reasoner
+HYDRAMIND_N8N_WEBHOOK='https://n8n.local/webhook/hydramind' \
+  python3 main.py --target 127.0.0.1 --skip-nikto   # notify n8n on events
+python3 dashboard.py                                # http://127.0.0.1:8765
 ```
 Out-of-scope targets are refused by the Scope Firewall before any subprocess runs.
 
@@ -355,6 +358,58 @@ Tests: `python tests/test_phase4.py` (validator parsing/provider selection,
 model registry/families/independence, writer citations, report rendering +
 HTML escaping, DB round-trips, model-call logging, eval scoring).
 
+## Phase 5 — n8n alerts + local dashboard
+
+### n8n notifications (`engine/notifier.py`)
+Import `integrations/n8n/hydramind_notify.json` into n8n, activate the
+workflow, and point HydraMind at its production URL:
+
+```bash
+export HYDRAMIND_N8N_WEBHOOK='https://<n8n>/webhook/hydramind'
+python3 main.py --target 127.0.0.1 --skip-nikto
+python3 main.py ... --webhook 'https://<n8n>/webhook/hydramind'  # per-run
+python3 main.py ... --no-notify                                  # disable
+```
+
+| Event | When | Payload highlights |
+|---|---|---|
+| `scan_started` | scope allowed, scan row created | `scan_id`, `target`, `profile`, `dry_run` |
+| `scan_refused` | scope firewall denied target | `target`, `reason` |
+| `scan_failed` | triage/reasoner AI call or seed URL failed | `scan_id`, `stage`, `error` |
+| `scan_finished` | pipeline end | counts + verdicts + report paths |
+| `validation_finished` | `--validate-scan` done | counts + verdicts + report paths |
+
+Payload envelope: `{"source":"hydramind","event":"...","timestamp":"...",
+"data":{...}}`; `scan_finished` also includes `raw_findings`,
+`triage_findings`, `executed_actions`, `validations`, `verdicts`,
+`dry_run` and `reports`. The webhook is best-effort (5 s timeout): failures
+log one line and never abort a scan. Before sending, keys named `key`,
+`token`, `secret`, `cookie`, `password` or `authorization` are replaced with
+`[redacted]` and strings pass through `models.redact` — cookies and API keys
+never leave the machine. In n8n, replace the NoOp node with Slack/Telegram/
+Email/Discord and use `{{ $json.message }}`.
+
+### Dashboard (`dashboard.py`, `engine/dashboard.py`)
+```bash
+python3 dashboard.py                 # 127.0.0.1:8765
+python3 dashboard.py --port 9000 --db data/pipeline.db
+```
+Read-only view over the audit trail: totals, scans (profile, raw/triage/
+executed counts, confirmed/FP, report links), per-scan validations,
+decisions and writer summary, recent model calls and scope events. It
+auto-refreshes every 10 s. Endpoints: `/`, `/api/health`, `/api/overview`,
+`/api/scan/<id>`, `/reports/report_<id>.md|html`.
+
+Security: binds localhost only by default (non-loopback bind prints a
+warning — there is no authentication), never writes to SQLite, and only
+serves files matching `report_<id>.md|html` from `reports/` (traversal and
+arbitrary names are rejected). WAL mode + a 5 s busy timeout let it read
+while a scan is writing.
+
+Tests: `python tests/test_phase5.py` (43 checks — event redaction, webhook
+delivery/failure, dashboard counts/detail, report path guard, HTTP API,
+n8n workflow JSON).
+
 ## Lab targets (local, scope-listed, `environment: lab`)
 
 | Target | Service | Status |
@@ -387,5 +442,6 @@ Metasploit setup, so tests can run beyond localhost.
 - Phase 4.1 (done): role-based model registry + profiles (`hybrid/free/
   quality/local`), Ollama/OpenRouter adapters, computed cross-family
   independence, per-call logging (`model_calls`), opt-in grounded writer
-- Phase 5: n8n trigger/notify + dashboard
+- Phase 5 (done): n8n trigger/notify (scan events, redacted payloads,
+  best-effort delivery) + read-only localhost dashboard over SQLite
 - Phase 6: LangGraph agent + RAG (CVE/ExploitDB) + richer routing policies

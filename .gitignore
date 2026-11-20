@@ -10,3 +10,5 @@ eval/artifacts/
 eval/labs.yaml
 .env
 nikto_*.txt
+data/*.db-wal
+data/*.db-shm

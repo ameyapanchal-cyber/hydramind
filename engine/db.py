@@ -10,8 +10,9 @@ DB_PATH = Path(__file__).resolve().parents[1] / "data" / "pipeline.db"
 
 def _conn():
     DB_PATH.parent.mkdir(exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=5)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout = 5000")
     return conn
 
 
@@ -21,6 +22,7 @@ def _now() -> str:
 
 def init_db():
     with _conn() as c:
+        c.execute("PRAGMA journal_mode=WAL")
         c.execute("""CREATE TABLE IF NOT EXISTS scans (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             target TEXT NOT NULL, tool TEXT NOT NULL, started_at TEXT NOT NULL)""")
