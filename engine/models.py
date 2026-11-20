@@ -53,24 +53,40 @@ BUILTIN_PROFILES = {
         "reasoner": {"provider": "openai", "model": "gpt-4o"},
         "validator": {"provider": "google", "model": "gemini-flash-latest"},
         "writer": {"provider": "none", "model": ""},
+        "tiers": {
+            "deep": {"provider": "openai", "model": "gpt-4o"},
+            "cheap": {"provider": "openai", "model": "gpt-4o-mini"},
+        },
     },
     "free": {
         "triager": {"provider": "ollama", "model": "llama3.1:8b"},
         "reasoner": {"provider": "google", "model": "gemini-flash-latest"},
         "validator": {"provider": "ollama", "model": "mistral:7b"},
         "writer": {"provider": "none", "model": ""},
+        "tiers": {
+            "deep": {"provider": "google", "model": "gemini-flash-latest"},
+            "cheap": {"provider": "ollama", "model": "llama3.1:8b"},
+        },
     },
     "quality": {
         "triager": {"provider": "ollama", "model": "llama3.1:8b"},
         "reasoner": {"provider": "anthropic", "model": "claude-sonnet-4-5"},
         "validator": {"provider": "google", "model": "gemini-flash-latest"},
         "writer": {"provider": "none", "model": ""},
+        "tiers": {
+            "deep": {"provider": "anthropic", "model": "claude-sonnet-4-5"},
+            "cheap": {"provider": "ollama", "model": "llama3.1:8b"},
+        },
     },
     "local": {
         "triager": {"provider": "ollama", "model": "llama3.1:8b"},
         "reasoner": {"provider": "ollama", "model": "qwen2.5:7b"},
         "validator": {"provider": "ollama", "model": "mistral:7b"},
         "writer": {"provider": "none", "model": ""},
+        "tiers": {
+            "deep": {"provider": "ollama", "model": "qwen2.5:7b"},
+            "cheap": {"provider": "ollama", "model": "llama3.1:8b"},
+        },
     },
 }
 
@@ -213,6 +229,25 @@ def resolve_role(role: str, profile: str | None = None) -> dict:
         model = DEFAULT_MODELS[provider]
     return {"role": role, "profile": pname, "provider": provider,
             "model": model, "family": model_family(provider, model)}
+
+
+def resolve_tier(name: str, profile: str | None = None) -> dict | None:
+    """Resolve a symbolic model tier (e.g. deep/cheap) for a profile."""
+    cfg = _load()
+    pname = profile or active_profile()
+    profile_cfg = cfg["profiles"].get(pname) or {}
+    tier = (profile_cfg.get("tiers") or {}).get(name)
+    if not tier and pname in BUILTIN_PROFILES:
+        tier = (BUILTIN_PROFILES[pname].get("tiers") or {}).get(name)
+    if not tier:
+        return None
+    provider = str(tier.get("provider") or "none").strip().lower()
+    model = str(tier.get("model") or "").strip()
+    if not model and provider in DEFAULT_MODELS:
+        model = DEFAULT_MODELS[provider]
+    return {"role": "tier", "tier": name, "profile": pname,
+            "provider": provider, "model": model,
+            "family": model_family(provider, model)}
 
 
 def _ensure_available(cfg: dict, prefer_diff_family: str | None = None) -> dict:

@@ -2,7 +2,7 @@
 
 Enable with `--webhook https://n8n.example/webhook/hydramind` or
 `HYDRAMIND_N8N_WEBHOOK`. Events: scan_started, scan_refused, scan_failed,
-scan_finished, validation_finished. Payloads contain only audit-trail metadata
+scan_finished, validation_finished, agent_plan. Payloads contain only audit-trail metadata
 (no cookies, API keys or raw tool output); secrets are redacted before sending.
 A failed webhook logs one line and the scan continues.
 """

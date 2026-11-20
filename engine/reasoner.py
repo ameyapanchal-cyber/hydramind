@@ -15,7 +15,7 @@ import shlex
 from dataclasses import dataclass, asdict
 from pathlib import Path
 
-from engine import models
+from engine import models, rag, routing
 from engine.findings import Finding
 
 
@@ -114,7 +114,10 @@ Hard rules for exact_tool_and_command:
   injects the configured session cookie automatically
 - no shell chaining: no ; | && || backticks sudo
 - no file input/output arguments (-o, -O, -T, @file, --config)
-- if nothing sensible is possible, propose the best passive verification"""
+- if nothing sensible is possible, propose the best passive verification
+- if retrieved references ([R1], [R2], ...) are supplied, ground CVE, version
+  and exploit claims in them, cite the [R#] tag in attack_hypothesis, and
+  never invent CVE IDs or exploit details"""
 
 
 @dataclass
@@ -135,7 +138,8 @@ def _clean_text(value, limit=600) -> str:
 
 
 def reason_about_finding(finding: Finding, full_context: dict,
-                         scan_id: int | None = None) -> ReasonerOutput:
+                         scan_id: int | None = None,
+                         role_cfg: dict | None = None) -> ReasonerOutput:
     """
     finding: the single Finding to reason about.
     full_context: {
@@ -158,8 +162,18 @@ def reason_about_finding(finding: Finding, full_context: dict,
         "context": {"sibling_findings": siblings, "action_history": history},
     }, indent=2, default=str)
 
+    docs = rag.retrieve_for_finding({**finding.to_dict(),
+                                     "sibling_findings": siblings}, k=3)
+    refs = rag.context_block(docs)
+    if refs:
+        user_msg = f"{user_msg}\n\n{refs}"
+    if role_cfg is None:
+        role_cfg, _ = routing.resolve("reasoner", {
+            "severity": finding.severity, "source": finding.tool,
+            "rag_score": docs[0]["score"] if docs else 0})
     reply = models.chat("reasoner", SYSTEM_PROMPT, user_msg,
-                        temperature=0.3, json_mode=True, scan_id=scan_id)
+                        temperature=0.3, json_mode=True, scan_id=scan_id,
+                        role_cfg=role_cfg)
     return parse_reasoner_output(reply.text)
 
 

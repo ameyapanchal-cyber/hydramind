@@ -24,21 +24,36 @@ profiles:
     reasoner:  {provider: openai,    model: gpt-4o}
     validator: {provider: google,    model: gemini-flash-latest}
     writer:    {provider: none,      model: ""}
+    tiers:
+      deep:  {provider: openai, model: gpt-4o}
+      cheap: {provider: openai, model: gpt-4o-mini}
 
   free:                   # zero API cost (needs Ollama + Gemini free tier)
     triager:   {provider: ollama,    model: llama3.1:8b}
     reasoner:  {provider: google,    model: gemini-flash-latest}
     validator: {provider: ollama,    model: mistral:7b}
     writer:    {provider: none,      model: ""}
+    tiers:
+      deep:  {provider: ollama, model: qwen2.5:7b}
+      cheap: {provider: ollama, model: llama3.1:8b}
+    tiers:
+      deep:  {provider: google, model: gemini-flash-latest}
+      cheap: {provider: ollama, model: llama3.1:8b}
 
   quality:                # best reasoning, local triage
     triager:   {provider: ollama,    model: llama3.1:8b}
     reasoner:  {provider: anthropic, model: claude-sonnet-4-5}
     validator: {provider: google,    model: gemini-flash-latest}
     writer:    {provider: none,      model: ""}
+    tiers:
+      deep:  {provider: anthropic, model: claude-sonnet-4-5}
+      cheap: {provider: ollama,    model: llama3.1:8b}
 
   local:                  # fully offline; two different local families
     triager:   {provider: ollama,    model: llama3.1:8b}
     reasoner:  {provider: ollama,    model: qwen2.5:7b}
     validator: {provider: ollama,    model: mistral:7b}
     writer:    {provider: none,      model: ""}
+    tiers:
+      deep:  {provider: ollama, model: qwen2.5:7b}
+      cheap: {provider: ollama, model: llama3.1:8b}

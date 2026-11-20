@@ -12,3 +12,4 @@ eval/labs.yaml
 nikto_*.txt
 data/*.db-wal
 data/*.db-shm
+data/agent_scan_*.json

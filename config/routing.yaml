@@ -1,0 +1,43 @@
+# Context-aware model routing (opt-in).
+#
+# When enabled, the first matching rule for a role replaces that role's
+# profile model with a symbolic tier from the active profile (tiers: deep /
+# cheap in config/models.yaml) or an explicit provider/model.
+#
+# Enable with --routing on main.py/agent.py or HYDRAMIND_ROUTING=1.
+# Rules are AND-ed across every condition in "when". If no rule matches, the
+# profile default is used. The validator is never routed: independence is
+# computed against the reasoner, so changing it silently would be unsafe.
+# Rules that would move the reasoner into the validator's model family are
+# skipped with a warning.
+
+enabled: false
+
+rules:
+  - name: deep-critical-high
+    role: reasoner
+    when:
+      severity: [critical, high]
+    use:
+      tier: deep
+
+  - name: deep-exploit-context
+    role: reasoner
+    when:
+      rag_score_gte: 6.0
+    use:
+      tier: deep
+
+  - name: cheap-low-severity
+    role: reasoner
+    when:
+      severity: [info, low]
+    use:
+      tier: cheap
+
+  - name: cheap-bulk-triage
+    role: triager
+    when:
+      finding_count_gte: 40
+    use:
+      tier: cheap

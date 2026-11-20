@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""HydraMind — Phase 5. Usage: python3 main.py --target 127.0.0.1
+"""HydraMind — Phase 6. Usage: python3 main.py --target 127.0.0.1
 
 Pipeline: scope check -> recon (nmap/gobuster/nikto, all logged) -> AI triage
 -> per-finding AI Reasoner (GPT-4o) -> HUMAN APPROVAL GATE -> approved actions
@@ -25,7 +25,7 @@ from engine.triager import triage
 from engine.reasoner import reason_about_finding, validate_action
 from engine.validator import validate_scan, provider_config
 from engine.findings import finding_from_tool, finding_from_triage
-from engine import db, models, notifier, reporter
+from engine import db, models, notifier, reporter, routing
 
 SCOPE_FILE = Path(__file__).resolve().parent / "config" / "scope.yaml"
 GOBUSTER_WORDLIST_ROOT = Path("/usr/share/wordlists")
@@ -192,7 +192,7 @@ def _ai_fail_hint(e: Exception) -> str:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="HydraMind (Phase 5)")
+    ap = argparse.ArgumentParser(description="HydraMind (Phase 6)")
     ap.add_argument("--target", help="host to test (required unless --report/--validate-scan)")
     ap.add_argument("--skip-nikto", action="store_true", help="skip nikto (slow)")
     ap.add_argument("--ports", help="nmap port spec (e.g. 1-10000, 6379,8080)")
@@ -212,9 +212,15 @@ def main() -> int:
     ap.add_argument("--webhook", help="n8n webhook URL for scan events "
                                       "(default env HYDRAMIND_N8N_WEBHOOK)")
     ap.add_argument("--no-notify", action="store_true", help="disable n8n webhook events")
+    ap.add_argument("--routing", action="store_true",
+                    help="context-aware model routing (config/routing.yaml)")
     args = ap.parse_args()
     models.configure(args.profile)
     notifier.configure(args.webhook, enabled=not args.no_notify)
+    if args.routing:
+        os.environ["HYDRAMIND_ROUTING"] = "1"
+    if routing.enabled():
+        print("[routing] context-aware routing enabled (config/routing.yaml)")
 
     if args.report is not None:
         db.init_db()

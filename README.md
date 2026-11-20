@@ -9,7 +9,8 @@ Many models (the heads), one reasoning core (the mind).
 ## Requirements
 - Kali Linux, Python 3.11+, nmap, gobuster, nikto, curl, sqlmap, redis-cli,
   hydra, wpscan, commix
-- Python packages: `PyYAML`, `openai`, `requests` (see `requirements.txt`)
+- Python packages: `PyYAML`, `openai`, `requests`, `langgraph`
+  (see `requirements.txt`)
 
 ## Setup
 ```bash
@@ -41,6 +42,8 @@ python3 main.py --target 127.0.0.1 --skip-nikto --profile quality # Claude reaso
 HYDRAMIND_N8N_WEBHOOK='https://n8n.local/webhook/hydramind' \
   python3 main.py --target 127.0.0.1 --skip-nikto   # notify n8n on events
 python3 dashboard.py                                # http://127.0.0.1:8765
+python3 main.py --target 127.0.0.1 --skip-nikto --routing   # context-aware models
+python3 agent.py --scan 16 --routing                # LangGraph plan, executes nothing
 ```
 Out-of-scope targets are refused by the Scope Firewall before any subprocess runs.
 
@@ -378,6 +381,7 @@ python3 main.py ... --no-notify                                  # disable
 | `scan_failed` | triage/reasoner AI call or seed URL failed | `scan_id`, `stage`, `error` |
 | `scan_finished` | pipeline end | counts + verdicts + report paths |
 | `validation_finished` | `--validate-scan` done | counts + verdicts + report paths |
+| `agent_plan` | `agent.py` finished a review | `scan_id`, counts, plan path |
 
 Payload envelope: `{"source":"hydramind","event":"...","timestamp":"...",
 "data":{...}}`; `scan_finished` also includes `raw_findings`,
@@ -409,6 +413,65 @@ while a scan is writing.
 Tests: `python tests/test_phase5.py` (43 checks — event redaction, webhook
 delivery/failure, dashboard counts/detail, report path guard, HTTP API,
 n8n workflow JSON).
+
+## Phase 6 — RAG, routing policies, LangGraph review agent
+
+### CVE/ExploitDB RAG (`engine/rag.py`, `knowledge/cve_exploits.jsonl`)
+The triager and reasoner receive the top-ranked references for each finding
+from a tracked, curated corpus (27 entries: Apache 2.4.49/2.4.50, Log4Shell,
+ProxyShell, Redis unauth, DVWA, Jenkins, Docker API, ...). Ranking is offline
+BM25 with exact boosts for CVE IDs, products and affected versions; prompts
+require citations as `[R1]`, `[R2]` and forbid invented CVEs.
+
+```bash
+export HYDRAMIND_RAG=0                   # disable retrieval
+export HYDRAMIND_RAG_EXTRA=/path/extra.jsonl:/path/more.jsonl  # extra corpora
+export HYDRAMIND_RAG_SEARCHSPLOIT=1      # also query local searchsploit
+export HYDRAMIND_AGENT_RAG_DEEP=4.0      # agent deep-review score threshold
+```
+Extra JSONL entries use the same schema as the tracked corpus. `searchsploit`
+runs as an argv list with an 8 s timeout, only when explicitly enabled; its
+results are labelled `EDB-*` and never executed.
+
+### Routing policies (`engine/routing.py`, `config/routing.yaml`)
+Opt-in, context-aware model selection per role (profile remains the default):
+
+```bash
+python3 main.py --target 127.0.0.1 --skip-nikto --routing
+export HYDRAMIND_ROUTING=1
+export HYDRAMIND_ROUTING_FILE=/path/routing.yaml
+```
+
+Rules match on severity, source, risk level, minimum finding count or minimum
+RAG score and select a symbolic tier (`deep`/`cheap` from the active profile,
+now defined in `config/models.yaml`) or an explicit provider/model. The
+validator is deliberately never routed — its cross-family independence is
+computed against the reasoner — and any rule that would move the reasoner into
+the validator's family is skipped with a warning. Shipped rules: high/critical
+or strong RAG hit → `deep`; low/info → `cheap`; ≥40 triage findings → cheap
+triage.
+
+### LangGraph review agent (`agent.py`, `engine/agent.py`)
+```bash
+python3 agent.py --scan 16                          # RAG + high-severity review
+python3 agent.py --scan 16 --routing --max-deep 3
+python3 agent.py --scan 16 --no-rag --json /tmp/plan.json
+```
+The graph is `load → route → (deep_review | assemble) → assemble → END`.
+`route` retrieves references and applies routing per finding; `deep_review`
+asks the reasoner for ONE next command, grounded with `[R#]` citations;
+`assemble` writes `data/agent_scan_<id>.json` (or `--json`) and prints a plan.
+
+**Safety:** the agent is review-only. It never executes a command, never
+changes findings/decisions/validations (model calls are still audited), caps
+deep reviews (default 4), and runs every proposal through the same
+`validate_action` fail-closed boundary. Output entries carry
+`command_safe: true|false`; execution still requires `main.py` and the single
+human approval gate. If a webhook is configured the `agent_plan` event is sent.
+
+Tests: `python tests/test_phase6.py` (38 checks — corpus/ranking/cutoff,
+extra corpora, routing tiers/overrides/disable, prompt citation injection,
+LangGraph fan-out, safety rejection, deep cap, DB immutability).
 
 ## Lab targets (local, scope-listed, `environment: lab`)
 
@@ -444,4 +507,6 @@ Metasploit setup, so tests can run beyond localhost.
   independence, per-call logging (`model_calls`), opt-in grounded writer
 - Phase 5 (done): n8n trigger/notify (scan events, redacted payloads,
   best-effort delivery) + read-only localhost dashboard over SQLite
-- Phase 6: LangGraph agent + RAG (CVE/ExploitDB) + richer routing policies
+- Phase 6 (done): offline CVE/ExploitDB RAG with [R#] grounding, opt-in
+  context-aware routing tiers, LangGraph review agent (plan-only,
+  safety-checked, never executes)
