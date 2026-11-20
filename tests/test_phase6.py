@@ -18,7 +18,7 @@ sys.path.insert(0, str(ROOT))
 
 from engine import agent, db, models, rag, routing  # noqa: E402
 from engine.findings import Finding  # noqa: E402
-from engine.reasoner import ReasonerOutput  # noqa: E402
+from engine.reasoner import ReasonerOutput, validate_action  # noqa: E402
 from engine import reasoner, triager  # noqa: E402
 
 PASS = 0
@@ -205,6 +205,26 @@ def test_prompts() -> None:
         routing.reload()
 
 
+def test_safety() -> None:
+    check("safety: unquoted semicolon chain rejected",
+          validate_action("redis-cli -h 127.0.0.1 -p 6379 CONFIG GET dir; "
+                          "redis-cli -h 127.0.0.1 -p 6379 KEYS *",
+                          "127.0.0.1") is None)
+    check("safety: unquoted ampersand rejected",
+          validate_action("curl -s http://127.0.0.1/?a=1&b=2", "127.0.0.1") is None)
+    check("safety: quoted URL accepted",
+          validate_action("curl -s 'http://127.0.0.1/?a=1&b=2'",
+                          "127.0.0.1") is not None)
+    check("safety: quoted payload semicolon accepted",
+          validate_action("commix -u 'http://127.0.0.1/x' --data 'ip=1;id'",
+                          "127.0.0.1") is not None)
+    check("safety: unquoted backtick rejected",
+          validate_action("curl http://127.0.0.1/`id`", "127.0.0.1") is None)
+    check("safety: quote-safe redis still accepted",
+          validate_action("redis-cli -h 127.0.0.1 -p 6379 INFO",
+                          "127.0.0.1") is not None)
+
+
 def seed_scan() -> int:
     scan_id = db.new_scan("127.0.0.1", "phase6")
     db.save_findings(scan_id, "nmap", [
@@ -284,6 +304,7 @@ def main() -> int:
         test_rag()
         test_routing()
         test_prompts()
+        test_safety()
         test_agent(Path(td))
         db.DB_PATH = old_db
     print(f"\n{PASS} checks passed")

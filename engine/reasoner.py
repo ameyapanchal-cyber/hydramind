@@ -205,12 +205,44 @@ def parse_reasoner_output(raw: str) -> ReasonerOutput:
     )
 
 
+def _has_unquoted_control(command: str) -> bool:
+    """Reject shell-looking operators outside quotes: ; | & ` $( and newlines.
+    Inside double quotes only backticks/$( are rejected (shell substitutions);
+    semicolons/& inside quotes stay inert arguments (sqlmap URLs, commix data)."""
+    quote = None
+    i = 0
+    while i < len(command):
+        ch = command[i]
+        if quote == "'":
+            if ch == "'":
+                quote = None
+        elif quote == '"':
+            if ch == "\\":
+                i += 2
+                continue
+            if ch == '"':
+                quote = None
+            elif ch in ("`", "\n") or (ch == "$" and command[i + 1:i + 2] == "("):
+                return True
+        else:
+            if ch in ("'", '"'):
+                quote = ch
+            elif ch in (";", "|", "&", "`", "\n"):
+                return True
+            elif ch == "$" and command[i + 1:i + 2] == "(":
+                return True
+        i += 1
+    return False
+
+
 def validate_action(command: str, target: str) -> dict | None:
     """
     Safety boundary for ONE proposed command. Fail-closed on unknown tools,
-    file I/O flags, destructive redis commands and target mismatch.
-    Returns {"tool", "args", "command"} or None.
+    file I/O flags, shell-looking operators, destructive redis commands and
+    target mismatch. Returns {"tool", "args", "command"} or None.
     """
+    if _has_unquoted_control(command or ""):
+        return None
     try:
         tokens = shlex.split(command or "")
     except ValueError:

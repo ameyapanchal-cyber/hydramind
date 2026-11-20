@@ -107,6 +107,19 @@ Zero errors, all validations `same_family=0`. Expect ~20 min for a dry-run and
 noisier triage than `hybrid` (generic LOW items like favicon/robots); the
 validator correctly marks unexecuted dry-run findings `needs_review`.
 
+Measured `local` profile run (scan 18, Redis on 127.0.0.1, host Ollama):
+
+| Role | Model | Calls | Latency |
+|---|---|---|---|
+| triager | llama3.1:8b | 1 | 43 s |
+| reasoner | qwen2.5:7b | 1 | 29 s |
+| validator | mistral:7b | 1 | 25 s |
+
+Zero errors, `same_family=0`; the unexecuted dry-run finding was correctly
+marked `needs_review`. qwen2.5:7b also proposed a chained-looking command in
+that run, so `validate_action` now rejects unquoted shell operators outside
+quotes (quoted sqlmap/commix payloads remain allowed).
+
 ### Scope firewall — two-stage authorization
 `config/scope.yaml` supports two forms side by side:
 - legacy `allowed_hosts` — recon only; exploitation-class tools always refused
@@ -469,7 +482,7 @@ deep reviews (default 4), and runs every proposal through the same
 `command_safe: true|false`; execution still requires `main.py` and the single
 human approval gate. If a webhook is configured the `agent_plan` event is sent.
 
-Tests: `python tests/test_phase6.py` (38 checks — corpus/ranking/cutoff,
+Tests: `python tests/test_phase6.py` (44 checks — corpus/ranking/cutoff,
 extra corpora, routing tiers/overrides/disable, prompt citation injection,
 LangGraph fan-out, safety rejection, deep cap, DB immutability).
 
